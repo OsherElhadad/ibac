@@ -164,6 +164,54 @@ Alternatively, use the provided scripts (after starting the required components)
 
 4. **Fail-closed**: If the LLM is unavailable, the session ID is missing, or the response is unparseable, the sidecar defaults to **BLOCK**.
 
+## Troubleshooting
+
+### Checking if services are already running
+
+Before starting the demo, check if any services are already running:
+
+```bash
+# Check for running processes
+lsof -i :8080  # Agent
+lsof -i :9090  # Sidecar
+lsof -i :9999  # Evil-server
+lsof -i :10000 # Envoy inbound
+lsof -i :10001 # Envoy outbound
+```
+
+### Stopping services
+
+If you need to stop services from a previous run:
+
+```bash
+# Kill by port (replace PORT with actual port number)
+kill -9 $(lsof -ti :PORT)
+
+# Or kill by process name
+pkill -f sidecar
+pkill -f agent
+pkill -f evil-server
+pkill -f envoy
+```
+
+### Finding logs
+
+- **Sidecar**: Logs to stdout/stderr. When run via `make run-sidecar`, check the terminal output. Background processes may log to `/tmp/sidecar.log` or `/private/tmp/sidecar.log`
+- **Agent**: Logs to stdout/stderr. Check the terminal where you ran `make run-agent-ibac`
+- **Envoy**: Logs to stdout/stderr in the terminal where you ran `make envoy`
+- **Evil-server**: Logs to stdout/stderr. Check the terminal where you ran `make run-evil-server`
+
+### Common issues
+
+**Port already in use**: If you see "bind: address already in use", a service from a previous run is still active. Use the commands above to stop it.
+
+**Empty response or JSON parse error**: Ensure all services are running and healthy before sending requests. Wait a few seconds after starting services for them to fully initialize.
+
+**LLM timeout**: If the sidecar takes too long to respond, check that ollama is running and the `llama3.2:3b` model is available:
+```bash
+curl http://localhost:11434/v1/models
+```
+
 ## Project Structure
 
 ```
