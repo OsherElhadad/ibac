@@ -1,6 +1,26 @@
-.PHONY: build agent agent-ibac sidecar evil-server envoy clean
+.PHONY: help build agent sidecar evil-server weather-server clean \
+       create-cluster delete-cluster deploy undeploy \
+       demo-no-ibac demo-ibac logs
 
-build: agent sidecar evil-server
+.DEFAULT_GOAL := help
+
+help:
+	@echo "Usage: make <target>"
+	@echo ""
+	@echo "Build targets:"
+	@echo "  build                 Build all Go binaries"
+	@echo "  clean                 Remove built binaries"
+	@echo ""
+	@echo "Kubernetes targets:"
+	@echo "  create-cluster        Create kind cluster"
+	@echo "  delete-cluster        Delete kind cluster"
+	@echo "  deploy                Build images and deploy all resources"
+	@echo "  undeploy              Delete all deployed resources (keeps cluster)"
+	@echo "  demo-no-ibac          Run attack WITHOUT IBAC (exfiltration succeeds)"
+	@echo "  demo-ibac             Run attack WITH IBAC (exfiltration blocked)"
+	@echo "  logs                  View logs from all pods"
+
+build: agent sidecar evil-server weather-server
 
 agent:
 	go build -o bin/agent ./agent/
@@ -11,30 +31,36 @@ sidecar:
 evil-server:
 	go build -o bin/evil-server ./evil-server/
 
-# Run agent in direct mode (no IBAC proxy)
-run-agent:
-	./bin/agent
-
-# Run agent with IBAC proxy (outbound goes through envoy :10001)
-run-agent-ibac:
-	IBAC_PROXY=http://localhost:10001 ./bin/agent
-
-run-sidecar:
-	./bin/sidecar
-
-run-evil-server:
-	./bin/evil-server
-
-# Run envoy via func-e (install with: brew install func-e)
-envoy:
-	func-e run -c $(PWD)/envoy/envoy.yaml
-
-# Alternative: run envoy via Docker
-envoy-docker:
-	docker run --rm --network=host \
-		-v $(PWD)/envoy:/etc/envoy \
-		envoyproxy/envoy:v1.28-latest \
-		-c /etc/envoy/envoy.yaml
+weather-server:
+	go build -o bin/weather-server ./weather-server/
 
 clean:
 	rm -rf bin/
+
+# --- Kubernetes (kind) targets ---
+
+create-cluster:
+	./scripts/k8s-create-cluster.sh
+
+delete-cluster:
+	./scripts/k8s-cleanup.sh
+
+deploy:
+	./scripts/k8s-deploy.sh
+
+undeploy:
+	./scripts/k8s-undeploy.sh
+
+demo-no-ibac:
+	./scripts/k8s-demo-no-ibac.sh
+
+demo-ibac:
+	./scripts/k8s-demo-ibac.sh
+
+logs:
+	@echo "=== evil-server ===" && kubectl -n ibac logs -l app=evil-server --tail=50 || true
+	@echo "=== weather-server ===" && kubectl -n ibac logs -l app=weather-server --tail=50 || true
+	@echo "=== agent-no-ibac ===" && kubectl -n ibac logs -l app=agent-no-ibac --tail=50 || true
+	@echo "=== ibac-agent (agent) ===" && kubectl -n ibac logs -l app=ibac-agent -c agent --tail=50 || true
+	@echo "=== ibac-agent (envoy) ===" && kubectl -n ibac logs -l app=ibac-agent -c envoy --tail=50 || true
+	@echo "=== ibac-agent (sidecar) ===" && kubectl -n ibac logs -l app=ibac-agent -c sidecar --tail=50 || true

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 
@@ -142,7 +143,11 @@ Respond with ONLY a JSON object, no other text:
 	}
 
 	// Call ollama directly (NOT through envoy proxy)
-	resp, err := http.Post("http://localhost:11434/v1/chat/completions", "application/json", bytes.NewReader(reqBody))
+	ollamaURL := os.Getenv("OLLAMA_URL")
+	if ollamaURL == "" {
+		ollamaURL = "http://localhost:11434"
+	}
+	resp, err := http.Post(ollamaURL+"/v1/chat/completions", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		log.Printf("[IBAC] Failed to call LLM: %v", err)
 		return "BLOCK", "LLM unavailable, default deny"

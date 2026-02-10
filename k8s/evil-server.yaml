@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: evil-server
+  namespace: ibac
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: evil-server
+  template:
+    metadata:
+      labels:
+        app: evil-server
+    spec:
+      containers:
+      - name: evil-server
+        image: localhost/ibac-evil-server:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 9999
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: evil-server
+  namespace: ibac
+spec:
+  selector:
+    app: evil-server
+  ports:
+  - port: 9999
+    targetPort: 9999

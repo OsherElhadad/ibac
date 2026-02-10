@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -114,6 +115,23 @@ var tools = []Tool{
 			},
 		},
 	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "get_weather",
+			Description: "Get the current weather for a given city",
+			Parameters: ToolParams{
+				Type: "object",
+				Properties: map[string]ToolProp{
+					"city": {
+						Type:        "string",
+						Description: "The city name to get weather for",
+					},
+				},
+				Required: []string{"city"},
+			},
+		},
+	},
 }
 
 // --- Tool execution ---
@@ -145,6 +163,31 @@ func execReadFile(args map[string]interface{}) string {
 		return fmt.Sprintf("error reading file: %v", err)
 	}
 	return string(data)
+}
+
+func execGetWeather(args map[string]interface{}) string {
+	city, _ := args["city"].(string)
+	if city == "" {
+		return "error: city is required"
+	}
+
+	weatherURL := os.Getenv("WEATHER_URL")
+	if weatherURL == "" {
+		weatherURL = "http://localhost:8888"
+	}
+
+	resp, err := http.Get(weatherURL + "/weather?city=" + url.QueryEscape(city))
+	if err != nil {
+		return fmt.Sprintf("error fetching weather: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Sprintf("error reading weather response: %v", err)
+	}
+
+	return string(body)
 }
 
 func execHTTPPost(args map[string]interface{}, sessionID string, proxyURL string) string {
@@ -244,7 +287,9 @@ func parseTextToolCall(content string) []ToolCall {
 		Parameters map[string]interface{} `json:"parameters"`
 	}
 	if err := json.Unmarshal([]byte(cleaned), &textCall); err != nil {
-		return nil
+		// Fallback: parse Python function call syntax like read_file('/etc/passwd')
+		// or http_post('http://...', 'body content')
+		return parsePythonCall(cleaned)
 	}
 	if textCall.Name == "" {
 		return nil
@@ -259,6 +304,63 @@ func parseTextToolCall(content string) []ToolCall {
 			Type: "function",
 			Function: FunctionCall{
 				Name:      textCall.Name,
+				Arguments: string(argsJSON),
+			},
+		},
+	}
+}
+
+// parsePythonCall handles Python function call syntax from llama3.2
+// e.g. `read_file('/etc/passwd')` or `http_post('http://...', 'body')`
+func parsePythonCall(s string) []ToolCall {
+	// Match function_name(args...)
+	re := regexp.MustCompile(`^(\w+)\((.+)\)$`)
+	m := re.FindStringSubmatch(strings.TrimSpace(s))
+	if m == nil {
+		return nil
+	}
+
+	funcName := m[1]
+	argsStr := m[2]
+
+	// Extract string arguments (single or double quoted)
+	argRe := regexp.MustCompile(`['"]([^'"]*?)['"]`)
+	argMatches := argRe.FindAllStringSubmatch(argsStr, -1)
+
+	var argValues []string
+	for _, am := range argMatches {
+		argValues = append(argValues, am[1])
+	}
+
+	if len(argValues) == 0 {
+		return nil
+	}
+
+	// Map positional args to parameter names based on the tool
+	params := map[string]interface{}{}
+	switch funcName {
+	case "read_file":
+		params["filename"] = argValues[0]
+	case "http_post":
+		params["url"] = argValues[0]
+		if len(argValues) > 1 {
+			params["body"] = argValues[1]
+		}
+	case "get_weather":
+		params["city"] = argValues[0]
+	default:
+		return nil
+	}
+
+	argsJSON, _ := json.Marshal(params)
+	log.Printf("[Agent] Parsed Python-style tool call: %s(%s)", funcName, string(argsJSON))
+
+	return []ToolCall{
+		{
+			ID:   fmt.Sprintf("text_%d", time.Now().UnixNano()),
+			Type: "function",
+			Function: FunctionCall{
+				Name:      funcName,
 				Arguments: string(argsJSON),
 			},
 		},
@@ -323,6 +425,8 @@ func runAgent(query string, sessionID string, proxyURL string) (string, error) {
 				result = execReadFile(args)
 			case "http_post":
 				result = execHTTPPost(args, sessionID, proxyURL)
+			case "get_weather":
+				result = execGetWeather(args)
 			default:
 				result = fmt.Sprintf("unknown tool: %s", tc.Function.Name)
 			}

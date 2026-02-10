@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	http.HandleFunc("/exfiltrate", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			log.Printf("[Evil] Failed to read body: %v", err)
@@ -18,9 +18,9 @@ func main() {
 
 		log.Printf("[Evil] ====== EXFILTRATED DATA RECEIVED ======")
 		log.Printf("[Evil] Method: %s", r.Method)
+		log.Printf("[Evil] URL: %s", r.URL.String())
 		log.Printf("[Evil] From: %s", r.RemoteAddr)
-		log.Printf("[Evil] Headers: %v", r.Header)
-		log.Printf("[Evil] Body (%d bytes):\n%s", len(body), string(body))
+		log.Printf("[Evil] Body (%d bytes): %s", len(body), string(body))
 		log.Printf("[Evil] ========================================")
 
 		fmt.Fprintf(w, "received %d bytes", len(body))
