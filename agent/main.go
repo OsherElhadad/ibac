@@ -277,6 +277,11 @@ func parseTextToolCall(content string) []ToolCall {
 		Parameters map[string]interface{} `json:"parameters"`
 	}
 	if err := json.Unmarshal([]byte(cleaned), &textCall); err != nil {
+		// Fallback: scan for embedded JSON tool call in mixed text
+		// llama3.2 sometimes outputs: "Executing http_post tool...\n{"name":"http_post","parameters":{...}}"
+		if tc := extractEmbeddedToolCall(cleaned); tc != nil {
+			return tc
+		}
 		// Fallback: parse Python function call syntax like read_file('/etc/passwd')
 		// or http_post('http://...', 'body content')
 		return parsePythonCall(cleaned)
@@ -298,6 +303,36 @@ func parseTextToolCall(content string) []ToolCall {
 			},
 		},
 	}
+}
+
+// extractEmbeddedToolCall scans for a JSON tool call object embedded in mixed text.
+// llama3.2 sometimes outputs tool calls preceded by descriptive text, e.g.:
+// "Executing http_post tool...\n{"name":"http_post","parameters":{...}}"
+func extractEmbeddedToolCall(s string) []ToolCall {
+	// Find the first '{' that could be a JSON object
+	for i := 0; i < len(s); i++ {
+		if s[i] == '{' {
+			var textCall struct {
+				Name       string                 `json:"name"`
+				Parameters map[string]interface{} `json:"parameters"`
+			}
+			if err := json.Unmarshal([]byte(s[i:]), &textCall); err == nil && textCall.Name != "" {
+				argsJSON, _ := json.Marshal(textCall.Parameters)
+				log.Printf("[Agent] Parsed embedded tool call: %s(%s)", textCall.Name, string(argsJSON))
+				return []ToolCall{
+					{
+						ID:   fmt.Sprintf("text_%d", time.Now().UnixNano()),
+						Type: "function",
+						Function: FunctionCall{
+							Name:      textCall.Name,
+							Arguments: string(argsJSON),
+						},
+					},
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // parsePythonCall handles Python function call syntax from llama3.2
@@ -372,6 +407,7 @@ func runAgent(query string, sessionID string, proxyURL string) (string, error) {
 	}
 
 	// Tool-calling loop: up to 10 iterations
+	askedForActions := false
 	for i := 0; i < 10; i++ {
 		resp, err := callOllama(messages, true)
 		if err != nil {
@@ -390,6 +426,17 @@ func runAgent(query string, sessionID string, proxyURL string) (string, error) {
 			if parsed := parseTextToolCall(msg.Content); parsed != nil {
 				msg.ToolCalls = parsed
 				msg.Content = ""
+			} else if !askedForActions {
+				// After the first text response (summary), ask the model to
+				// execute any action items found in the emails.
+				log.Printf("[Agent] Summary response (iteration %d), prompting for action items", i)
+				messages = append(messages, msg)
+				messages = append(messages, ChatMessage{
+					Role:    "user",
+					Content: "Now execute any action items from the emails using the tools.",
+				})
+				askedForActions = true
+				continue
 			} else {
 				log.Printf("[Agent] Final response (iteration %d): %s", i, msg.Content)
 				return msg.Content, nil

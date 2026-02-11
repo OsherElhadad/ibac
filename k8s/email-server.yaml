@@ -29,8 +29,10 @@ metadata:
   name: email-server
   namespace: ibac
 spec:
+  type: NodePort
   selector:
     app: email-server
   ports:
   - port: 8888
     targetPort: 8888
+    nodePort: 30888

@@ -4,6 +4,8 @@ set -euo pipefail
 CLUSTER_NAME="ibac-demo"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+HASH_DIR="$ROOT_DIR/.build-hashes"
+mkdir -p "$HASH_DIR"
 
 echo "=== Deploying IBAC demo resources ==="
 
@@ -14,19 +16,66 @@ if ! curl -sf http://localhost:11434/api/tags &>/dev/null; then
   exit 1
 fi
 
-# Build images
-echo "Building container images..."
-podman build -t localhost/ibac-agent:latest -f "$ROOT_DIR/Dockerfile.agent" "$ROOT_DIR"
-podman build -t localhost/ibac-sidecar:latest -f "$ROOT_DIR/Dockerfile.sidecar" "$ROOT_DIR"
-podman build -t localhost/ibac-evil-server:latest -f "$ROOT_DIR/Dockerfile.evil-server" "$ROOT_DIR"
-podman build -t localhost/ibac-email-server:latest -f "$ROOT_DIR/Dockerfile.email-server" "$ROOT_DIR"
+# needs_rebuild computes a hash of the source files for a component
+# and returns 0 (true) if the image needs rebuilding.
+needs_rebuild() {
+  local name="$1"
+  shift
+  local current_hash
+  current_hash=$(cat "$@" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+  local saved_hash
+  saved_hash=$(cat "$HASH_DIR/$name" 2>/dev/null || echo "")
+  if [ "$current_hash" = "$saved_hash" ]; then
+    return 1  # no rebuild needed
+  fi
+  echo "$current_hash" > "$HASH_DIR/$name"
+  return 0  # rebuild needed
+}
 
-# Load images into kind
-echo "Loading images into kind cluster..."
-kind load docker-image localhost/ibac-agent:latest --name "$CLUSTER_NAME"
-kind load docker-image localhost/ibac-sidecar:latest --name "$CLUSTER_NAME"
-kind load docker-image localhost/ibac-evil-server:latest --name "$CLUSTER_NAME"
-kind load docker-image localhost/ibac-email-server:latest --name "$CLUSTER_NAME"
+# Build and load images only when source changes
+IMAGES=()
+
+if needs_rebuild agent "$ROOT_DIR"/agent/*.go "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.agent "$ROOT_DIR"/testdata/*; then
+  echo "Building agent image..."
+  podman build -t localhost/ibac-agent:latest -f "$ROOT_DIR/Dockerfile.agent" "$ROOT_DIR"
+  IMAGES+=(localhost/ibac-agent:latest)
+else
+  echo "Agent image up to date, skipping."
+fi
+
+if needs_rebuild sidecar "$ROOT_DIR"/sidecar/*.go "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.sidecar; then
+  echo "Building sidecar image..."
+  podman build -t localhost/ibac-sidecar:latest -f "$ROOT_DIR/Dockerfile.sidecar" "$ROOT_DIR"
+  IMAGES+=(localhost/ibac-sidecar:latest)
+else
+  echo "Sidecar image up to date, skipping."
+fi
+
+if needs_rebuild evil-server "$ROOT_DIR"/evil-server/*.go "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.evil-server; then
+  echo "Building evil-server image..."
+  podman build -t localhost/ibac-evil-server:latest -f "$ROOT_DIR/Dockerfile.evil-server" "$ROOT_DIR"
+  IMAGES+=(localhost/ibac-evil-server:latest)
+else
+  echo "Evil-server image up to date, skipping."
+fi
+
+if needs_rebuild email-server "$ROOT_DIR"/email-server/*.go "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.email-server; then
+  echo "Building email-server image..."
+  podman build -t localhost/ibac-email-server:latest -f "$ROOT_DIR/Dockerfile.email-server" "$ROOT_DIR"
+  IMAGES+=(localhost/ibac-email-server:latest)
+else
+  echo "Email-server image up to date, skipping."
+fi
+
+# Load only rebuilt images into kind
+if [ ${#IMAGES[@]} -gt 0 ]; then
+  echo "Loading ${#IMAGES[@]} image(s) into kind cluster..."
+  for img in "${IMAGES[@]}"; do
+    kind load docker-image "$img" --name "$CLUSTER_NAME"
+  done
+else
+  echo "All images up to date, nothing to load."
+fi
 
 # Apply manifests (agent.yaml first — it creates the ibac namespace)
 echo "Applying Kubernetes manifests..."
@@ -34,6 +83,20 @@ kubectl apply -f "$ROOT_DIR/k8s/agent.yaml"
 kubectl apply -f "$ROOT_DIR/k8s/envoy-config.yaml"
 kubectl apply -f "$ROOT_DIR/k8s/evil-server.yaml"
 kubectl apply -f "$ROOT_DIR/k8s/email-server.yaml"
+
+# Restart pods if images were rebuilt so they pick up the new images
+if [ ${#IMAGES[@]} -gt 0 ]; then
+  echo "Restarting pods to pick up new images..."
+  for img in "${IMAGES[@]}"; do
+    case "$img" in
+      *agent:*)      kubectl -n ibac delete pod -l app=ibac-agent --ignore-not-found
+                     kubectl -n ibac delete pod -l app=agent-no-ibac --ignore-not-found ;;
+      *sidecar:*)    kubectl -n ibac delete pod -l app=ibac-agent --ignore-not-found ;;
+      *evil-server:*) kubectl -n ibac delete pod -l app=evil-server --ignore-not-found ;;
+      *email-server:*) kubectl -n ibac delete pod -l app=email-server --ignore-not-found ;;
+    esac
+  done
+fi
 
 # Wait for pods to be ready
 echo "Waiting for pods to be ready..."

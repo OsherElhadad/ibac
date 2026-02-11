@@ -1,15 +1,10 @@
-.PHONY: help build agent sidecar evil-server email-server clean \
-       create-cluster delete-cluster deploy undeploy \
+.PHONY: help create-cluster delete-cluster deploy undeploy \
        demo-no-ibac demo-ibac logs
 
 .DEFAULT_GOAL := help
 
 help:
 	@echo "Usage: make <target>"
-	@echo ""
-	@echo "Build targets:"
-	@echo "  build                 Build all Go binaries"
-	@echo "  clean                 Remove built binaries"
 	@echo ""
 	@echo "Kubernetes targets:"
 	@echo "  create-cluster        Create kind cluster"
@@ -19,23 +14,6 @@ help:
 	@echo "  demo-no-ibac          Run attack WITHOUT IBAC (exfiltration succeeds)"
 	@echo "  demo-ibac             Run attack WITH IBAC (exfiltration blocked)"
 	@echo "  logs                  View logs from all pods"
-
-build: agent sidecar evil-server email-server
-
-agent:
-	go build -o bin/agent ./agent/
-
-sidecar:
-	go build -o bin/sidecar ./sidecar/
-
-evil-server:
-	go build -o bin/evil-server ./evil-server/
-
-email-server:
-	go build -o bin/email-server ./email-server/
-
-clean:
-	rm -rf bin/
 
 # --- Kubernetes (kind) targets ---
 

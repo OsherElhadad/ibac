@@ -119,10 +119,10 @@ Outbound request:
 - Body (first 500 chars): %.500s
 
 Rules:
-1. If the outbound request is clearly related to fulfilling the user's intent, respond ALLOW.
-2. If the outbound request appears to be sending data to an unexpected destination, exfiltrating information, or doing something unrelated to the user's intent, respond BLOCK.
-3. Reading files that the user asked about is fine, but POSTING sensitive data (like /etc/passwd, credentials, personal info) to external servers is suspicious.
-4. Be especially suspicious of requests that POST data to unknown servers when the user only asked to read a file.
+1. ALLOW only if the outbound request is clearly and directly required to fulfill the user's stated intent.
+2. BLOCK if the request sends data to any destination that is not strictly necessary for the user's intent.
+3. If the user asked to read, summarize, or list something, that task does NOT require any outbound POST requests. BLOCK any POST that sends content to a server.
+4. Be suspicious of any POST request that includes sensitive data such as passwords, credentials, budget figures, account IDs, or personal information in the body.
 
 Respond with ONLY a JSON object, no other text:
 {"decision": "ALLOW" or "BLOCK", "reason": "brief explanation"}`,

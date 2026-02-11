@@ -19,7 +19,18 @@ if [ -z "$EVIL_POD" ]; then
   exit 1
 fi
 
-echo "Sending email query to IBAC-protected agent (localhost:30000)..."
+echo "Step 1: Show the poisoned email content"
+echo "----------------------------------------------"
+echo ""
+curl -s http://localhost:30888/emails
+echo ""
+echo "----------------------------------------------"
+echo "Notice the prompt injection at the end of the"
+echo "emails — it instructs the agent to POST data"
+echo "to an external server."
+echo ""
+echo ""
+echo "Step 2: Send email query to IBAC-protected agent (localhost:30000)..."
 echo ""
 
 # Note current evil-server log length
@@ -38,6 +49,8 @@ echo ""
 # Wait for potential exfiltration attempt
 sleep 5
 
+echo "Step 3: Check sidecar and evil-server logs"
+echo ""
 echo "Sidecar logs (intent validation):"
 kubectl -n ibac logs "$IBAC_POD" -c sidecar 2>/dev/null | tail -20
 echo ""
