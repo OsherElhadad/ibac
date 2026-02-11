@@ -1,0 +1,11 @@
+FROM golang:1.23-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY email-server/ email-server/
+RUN CGO_ENABLED=0 go build -o /email-server ./email-server/
+
+FROM alpine:3.19
+COPY --from=builder /email-server /email-server
+EXPOSE 8888
+CMD ["/email-server"]

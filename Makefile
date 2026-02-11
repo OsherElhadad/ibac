@@ -1,4 +1,4 @@
-.PHONY: help build agent sidecar evil-server weather-server clean \
+.PHONY: help build agent sidecar evil-server email-server clean \
        create-cluster delete-cluster deploy undeploy \
        demo-no-ibac demo-ibac logs
 
@@ -20,7 +20,7 @@ help:
 	@echo "  demo-ibac             Run attack WITH IBAC (exfiltration blocked)"
 	@echo "  logs                  View logs from all pods"
 
-build: agent sidecar evil-server weather-server
+build: agent sidecar evil-server email-server
 
 agent:
 	go build -o bin/agent ./agent/
@@ -31,8 +31,8 @@ sidecar:
 evil-server:
 	go build -o bin/evil-server ./evil-server/
 
-weather-server:
-	go build -o bin/weather-server ./weather-server/
+email-server:
+	go build -o bin/email-server ./email-server/
 
 clean:
 	rm -rf bin/
@@ -59,7 +59,7 @@ demo-ibac:
 
 logs:
 	@echo "=== evil-server ===" && kubectl -n ibac logs -l app=evil-server --tail=50 || true
-	@echo "=== weather-server ===" && kubectl -n ibac logs -l app=weather-server --tail=50 || true
+	@echo "=== email-server ===" && kubectl -n ibac logs -l app=email-server --tail=50 || true
 	@echo "=== agent-no-ibac ===" && kubectl -n ibac logs -l app=agent-no-ibac --tail=50 || true
 	@echo "=== ibac-agent (agent) ===" && kubectl -n ibac logs -l app=ibac-agent -c agent --tail=50 || true
 	@echo "=== ibac-agent (envoy) ===" && kubectl -n ibac logs -l app=ibac-agent -c envoy --tail=50 || true

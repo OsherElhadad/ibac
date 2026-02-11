@@ -28,8 +28,8 @@ spec:
         env:
         - name: IBAC_PROXY
           value: "http://localhost:10001"
-        - name: WEATHER_URL
-          value: "http://weather-server.ibac.svc.cluster.local:8888"
+        - name: EMAIL_URL
+          value: "http://email-server.ibac.svc.cluster.local:8888"
         - name: OLLAMA_URL
           value: "http://host.docker.internal:11434"
       - name: envoy
@@ -77,8 +77,8 @@ spec:
         ports:
         - containerPort: 8080
         env:
-        - name: WEATHER_URL
-          value: "http://weather-server.ibac.svc.cluster.local:8888"
+        - name: EMAIL_URL
+          value: "http://email-server.ibac.svc.cluster.local:8888"
         - name: OLLAMA_URL
           value: "http://host.docker.internal:11434"
 ---

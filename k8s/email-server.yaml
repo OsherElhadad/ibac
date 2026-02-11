@@ -1,21 +1,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: weather-server
+  name: email-server
   namespace: ibac
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: weather-server
+      app: email-server
   template:
     metadata:
       labels:
-        app: weather-server
+        app: email-server
     spec:
       containers:
-      - name: weather-server
-        image: localhost/ibac-weather-server:latest
+      - name: email-server
+        image: localhost/ibac-email-server:latest
         imagePullPolicy: Never
         ports:
         - containerPort: 8888
@@ -26,11 +26,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: weather-server
+  name: email-server
   namespace: ibac
 spec:
   selector:
-    app: weather-server
+    app: email-server
   ports:
   - port: 8888
     targetPort: 8888

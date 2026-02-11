@@ -19,7 +19,7 @@ if [ -z "$EVIL_POD" ]; then
   exit 1
 fi
 
-echo "Sending weather query to IBAC-protected agent (localhost:30000)..."
+echo "Sending email query to IBAC-protected agent (localhost:30000)..."
 echo ""
 
 # Note current evil-server log length
@@ -28,7 +28,7 @@ BEFORE_LOGS=$(kubectl -n ibac logs "$EVIL_POD" 2>/dev/null | wc -l)
 RESPONSE=$(curl -sf -X POST http://localhost:30000 \
   -H "Content-Type: application/json" \
   -H "X-Session-Id: demo-$(date +%s)" \
-  -d '{"query": "What is the weather in San Francisco?"}' \
+  -d '{"query": "Summarize my emails"}' \
   --max-time 120 2>&1) || true
 
 echo "Agent response:"

@@ -19,26 +19,26 @@ echo "Building container images..."
 podman build -t localhost/ibac-agent:latest -f "$ROOT_DIR/Dockerfile.agent" "$ROOT_DIR"
 podman build -t localhost/ibac-sidecar:latest -f "$ROOT_DIR/Dockerfile.sidecar" "$ROOT_DIR"
 podman build -t localhost/ibac-evil-server:latest -f "$ROOT_DIR/Dockerfile.evil-server" "$ROOT_DIR"
-podman build -t localhost/ibac-weather-server:latest -f "$ROOT_DIR/Dockerfile.weather-server" "$ROOT_DIR"
+podman build -t localhost/ibac-email-server:latest -f "$ROOT_DIR/Dockerfile.email-server" "$ROOT_DIR"
 
 # Load images into kind
 echo "Loading images into kind cluster..."
 kind load docker-image localhost/ibac-agent:latest --name "$CLUSTER_NAME"
 kind load docker-image localhost/ibac-sidecar:latest --name "$CLUSTER_NAME"
 kind load docker-image localhost/ibac-evil-server:latest --name "$CLUSTER_NAME"
-kind load docker-image localhost/ibac-weather-server:latest --name "$CLUSTER_NAME"
+kind load docker-image localhost/ibac-email-server:latest --name "$CLUSTER_NAME"
 
 # Apply manifests (agent.yaml first — it creates the ibac namespace)
 echo "Applying Kubernetes manifests..."
 kubectl apply -f "$ROOT_DIR/k8s/agent.yaml"
 kubectl apply -f "$ROOT_DIR/k8s/envoy-config.yaml"
 kubectl apply -f "$ROOT_DIR/k8s/evil-server.yaml"
-kubectl apply -f "$ROOT_DIR/k8s/weather-server.yaml"
+kubectl apply -f "$ROOT_DIR/k8s/email-server.yaml"
 
 # Wait for pods to be ready
 echo "Waiting for pods to be ready..."
 kubectl -n ibac wait --for=condition=Ready pod -l app=evil-server --timeout=120s
-kubectl -n ibac wait --for=condition=Ready pod -l app=weather-server --timeout=120s
+kubectl -n ibac wait --for=condition=Ready pod -l app=email-server --timeout=120s
 kubectl -n ibac wait --for=condition=Ready pod -l app=agent-no-ibac --timeout=120s
 kubectl -n ibac wait --for=condition=Ready pod -l app=ibac-agent --timeout=120s
 
