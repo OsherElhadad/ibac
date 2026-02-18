@@ -22,7 +22,7 @@ spec:
       containers:
       - name: agent
         image: localhost/ibac-agent:latest
-        imagePullPolicy: Never
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
         env:
@@ -43,7 +43,7 @@ spec:
         command: ["envoy", "-c", "/etc/envoy/envoy.yaml"]
       - name: sidecar
         image: localhost/ibac-sidecar:latest
-        imagePullPolicy: Never
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 9090
         env:
@@ -73,7 +73,7 @@ spec:
       containers:
       - name: agent
         image: localhost/ibac-agent:latest
-        imagePullPolicy: Never
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
         env:

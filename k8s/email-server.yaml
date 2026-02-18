@@ -16,7 +16,7 @@ spec:
       containers:
       - name: email-server
         image: localhost/ibac-email-server:latest
-        imagePullPolicy: Never
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8888
         env:

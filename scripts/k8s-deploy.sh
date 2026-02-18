@@ -9,6 +9,13 @@ mkdir -p "$HASH_DIR"
 
 echo "=== Deploying IBAC demo resources ==="
 
+# Ensure kubectl targets the correct kind cluster
+kubectl config use-context "kind-${CLUSTER_NAME}" &>/dev/null || {
+  echo "ERROR: kubectl context 'kind-${CLUSTER_NAME}' not found."
+  echo "Create the cluster first with: make create-cluster"
+  exit 1
+}
+
 # Check ollama is running
 if ! curl -sf http://localhost:11434/api/tags &>/dev/null; then
   echo "ERROR: ollama is not running on localhost:11434"
@@ -16,61 +23,96 @@ if ! curl -sf http://localhost:11434/api/tags &>/dev/null; then
   exit 1
 fi
 
-# needs_rebuild computes a hash of the source files for a component
-# and returns 0 (true) if the image needs rebuilding.
-needs_rebuild() {
-  local name="$1"
-  shift
+# needs_build checks if an image needs rebuilding:
+#   1. Image missing from podman → need build
+#   2. Source hash changed → need build
+needs_build() {
+  local name="$1"; shift
+  if ! podman image exists "localhost/ibac-${name}:latest" 2>/dev/null; then
+    # Image missing from podman; recompute and save hash so future runs are correct
+    local current_hash
+    current_hash=$(cat "$@" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+    echo "$current_hash" > "$HASH_DIR/$name"
+    return 0  # need build
+  fi
   local current_hash
   current_hash=$(cat "$@" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
   local saved_hash
   saved_hash=$(cat "$HASH_DIR/$name" 2>/dev/null || echo "")
-  if [ "$current_hash" = "$saved_hash" ]; then
-    return 1  # no rebuild needed
+  if [ "$current_hash" != "$saved_hash" ]; then
+    echo "$current_hash" > "$HASH_DIR/$name"
+    return 0  # need build
   fi
-  echo "$current_hash" > "$HASH_DIR/$name"
-  return 0  # rebuild needed
+  return 1
 }
 
-# Build and load images only when source changes
-IMAGES=()
+# needs_load checks if an image is missing from the kind cluster node.
+needs_load() {
+  local image="$1"
+  docker exec "${CLUSTER_NAME}-control-plane" crictl images -o json 2>/dev/null \
+    | grep -q "$image" && return 1
+  return 0  # need load
+}
 
-if needs_rebuild agent "$ROOT_DIR"/agent/*.go "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.agent "$ROOT_DIR"/testdata/*; then
+# Two arrays: BUILD_IMAGES need build+load, LOAD_IMAGES only need load
+BUILD_IMAGES=()
+LOAD_IMAGES=()
+
+# --- agent ---
+if needs_build agent "$ROOT_DIR"/agent/*.go "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.agent "$ROOT_DIR"/testdata/*; then
   echo "Building agent image..."
   podman build -t localhost/ibac-agent:latest -f "$ROOT_DIR/Dockerfile.agent" "$ROOT_DIR"
-  IMAGES+=(localhost/ibac-agent:latest)
+  BUILD_IMAGES+=(localhost/ibac-agent:latest)
+elif needs_load "localhost/ibac-agent:latest"; then
+  echo "Agent image missing from kind cluster, will load."
+  LOAD_IMAGES+=(localhost/ibac-agent:latest)
 else
   echo "Agent image up to date, skipping."
 fi
 
-if needs_rebuild sidecar "$ROOT_DIR"/sidecar/*.go "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.sidecar; then
+# --- sidecar ---
+if needs_build sidecar "$ROOT_DIR"/sidecar/*.go "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.sidecar; then
   echo "Building sidecar image..."
   podman build -t localhost/ibac-sidecar:latest -f "$ROOT_DIR/Dockerfile.sidecar" "$ROOT_DIR"
-  IMAGES+=(localhost/ibac-sidecar:latest)
+  BUILD_IMAGES+=(localhost/ibac-sidecar:latest)
+elif needs_load "localhost/ibac-sidecar:latest"; then
+  echo "Sidecar image missing from kind cluster, will load."
+  LOAD_IMAGES+=(localhost/ibac-sidecar:latest)
 else
   echo "Sidecar image up to date, skipping."
 fi
 
-if needs_rebuild evil-server "$ROOT_DIR"/evil-server/*.go "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.evil-server; then
+# --- evil-server ---
+if needs_build evil-server "$ROOT_DIR"/evil-server/*.go "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.evil-server; then
   echo "Building evil-server image..."
   podman build -t localhost/ibac-evil-server:latest -f "$ROOT_DIR/Dockerfile.evil-server" "$ROOT_DIR"
-  IMAGES+=(localhost/ibac-evil-server:latest)
+  BUILD_IMAGES+=(localhost/ibac-evil-server:latest)
+elif needs_load "localhost/ibac-evil-server:latest"; then
+  echo "Evil-server image missing from kind cluster, will load."
+  LOAD_IMAGES+=(localhost/ibac-evil-server:latest)
 else
   echo "Evil-server image up to date, skipping."
 fi
 
-if needs_rebuild email-server "$ROOT_DIR"/email-server/*.go "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.email-server; then
+# --- email-server ---
+if needs_build email-server "$ROOT_DIR"/email-server/*.go "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.email-server; then
   echo "Building email-server image..."
   podman build -t localhost/ibac-email-server:latest -f "$ROOT_DIR/Dockerfile.email-server" "$ROOT_DIR"
-  IMAGES+=(localhost/ibac-email-server:latest)
+  BUILD_IMAGES+=(localhost/ibac-email-server:latest)
+elif needs_load "localhost/ibac-email-server:latest"; then
+  echo "Email-server image missing from kind cluster, will load."
+  LOAD_IMAGES+=(localhost/ibac-email-server:latest)
 else
   echo "Email-server image up to date, skipping."
 fi
 
-# Load only rebuilt images into kind
-if [ ${#IMAGES[@]} -gt 0 ]; then
-  echo "Loading ${#IMAGES[@]} image(s) into kind cluster..."
-  for img in "${IMAGES[@]}"; do
+# Combine both arrays for loading into kind
+ALL_LOAD=()
+ALL_LOAD+=(${BUILD_IMAGES[@]+"${BUILD_IMAGES[@]}"})
+ALL_LOAD+=(${LOAD_IMAGES[@]+"${LOAD_IMAGES[@]}"})
+if [ ${#ALL_LOAD[@]} -gt 0 ]; then
+  echo "Loading ${#ALL_LOAD[@]} image(s) into kind cluster..."
+  for img in "${ALL_LOAD[@]}"; do
     kind load docker-image "$img" --name "$CLUSTER_NAME"
   done
 else
@@ -85,9 +127,11 @@ kubectl apply -f "$ROOT_DIR/k8s/evil-server.yaml"
 kubectl apply -f "$ROOT_DIR/k8s/email-server.yaml"
 
 # Restart pods if images were rebuilt so they pick up the new images
-if [ ${#IMAGES[@]} -gt 0 ]; then
+# (only for BUILD_IMAGES — LOAD_IMAGES are just missing from the node, pods
+#  will pick them up on next create via the manifests applied above)
+if [ ${#BUILD_IMAGES[@]} -gt 0 ]; then
   echo "Restarting pods to pick up new images..."
-  for img in "${IMAGES[@]}"; do
+  for img in "${BUILD_IMAGES[@]}"; do
     case "$img" in
       *agent:*)      kubectl -n ibac delete pod -l app=ibac-agent --ignore-not-found
                      kubectl -n ibac delete pod -l app=agent-no-ibac --ignore-not-found ;;

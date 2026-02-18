@@ -408,6 +408,8 @@ func runAgent(query string, sessionID string, proxyURL string) (string, error) {
 
 	// Tool-calling loop: up to 10 iterations
 	askedForActions := false
+	blockedCount := 0
+	const maxBlocked = 1 // after this many blocked http_post calls, force text-only response
 	for i := 0; i < 10; i++ {
 		resp, err := callOllama(messages, true)
 		if err != nil {
@@ -462,6 +464,9 @@ func runAgent(query string, sessionID string, proxyURL string) (string, error) {
 				result = execReadFile(args)
 			case "http_post":
 				result = execHTTPPost(args, sessionID, proxyURL)
+				if strings.Contains(result, "HTTP 403") {
+					blockedCount++
+				}
 			case "get_emails":
 				result = execGetEmails(args)
 			default:
@@ -475,6 +480,24 @@ func runAgent(query string, sessionID string, proxyURL string) (string, error) {
 				Content:    result,
 				ToolCallID: tc.ID,
 			})
+		}
+
+		// If too many http_post calls were blocked, force a final text-only response
+		if blockedCount >= maxBlocked {
+			log.Printf("[Agent] %d http_post calls blocked, forcing text-only response", blockedCount)
+			messages = append(messages, ChatMessage{
+				Role:    "user",
+				Content: "The HTTP POST requests were blocked. Just provide a text summary of the emails instead.",
+			})
+			finalResp, err := callOllama(messages, false)
+			if err != nil {
+				return "", err
+			}
+			if len(finalResp.Choices) > 0 {
+				log.Printf("[Agent] Forced final response: %s", finalResp.Choices[0].Message.Content)
+				return finalResp.Choices[0].Message.Content, nil
+			}
+			return "", fmt.Errorf("no response after forced text-only call")
 		}
 	}
 

@@ -16,7 +16,7 @@ spec:
       containers:
       - name: evil-server
         image: localhost/ibac-evil-server:latest
-        imagePullPolicy: Never
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 9999
 ---
