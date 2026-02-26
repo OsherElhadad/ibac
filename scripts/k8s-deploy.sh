@@ -71,7 +71,7 @@ else
 fi
 
 # --- sidecar ---
-if needs_build sidecar "$ROOT_DIR"/sidecar/*.go "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.sidecar; then
+if needs_build sidecar "$ROOT_DIR"/sidecar/*.go "$ROOT_DIR"/sidecar/*.txt "$ROOT_DIR"/go.mod "$ROOT_DIR"/go.sum "$ROOT_DIR"/Dockerfile.sidecar; then
   echo "Building sidecar image..."
   podman build -t localhost/ibac-sidecar:latest -f "$ROOT_DIR/Dockerfile.sidecar" "$ROOT_DIR"
   BUILD_IMAGES+=(localhost/ibac-sidecar:latest)

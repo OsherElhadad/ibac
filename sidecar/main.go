@@ -107,26 +107,35 @@ type IntentDecision struct {
 	Reason   string `json:"reason"`
 }
 
-// checkIntent uses an LLM to determine if an outbound action aligns with the original intent
-func checkIntent(intent, method, authority, path, body string) (string, string) {
-	prompt := fmt.Sprintf(`You are a security policy engine. Your job is to determine whether an outbound HTTP request is consistent with the user's original intent.
+// loadPromptTemplate reads the intent prompt template from a file.
+// It looks for intent_prompt.txt next to the binary first, then falls back to the current directory.
+func loadPromptTemplate() string {
+	paths := []string{"intent_prompt.txt", "sidecar/intent_prompt.txt"}
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err == nil {
+			log.Printf("[IBAC] Loaded intent prompt from %s", p)
+			return string(data)
+		}
+	}
+	log.Fatal("[IBAC] Could not load intent_prompt.txt")
+	return ""
+}
 
-User's original intent: "%s"
+var intentPromptTemplate = loadPromptTemplate()
 
-Outbound request:
+// formatHTTPAction formats an HTTP request as an action description for the intent prompt
+func formatHTTPAction(method, authority, path, body string) string {
+	return fmt.Sprintf(`Type: Outbound HTTP request
 - Method: %s
 - Destination: %s%s
-- Body (first 500 chars): %.500s
+- Body (first 500 chars): %.500s`, method, authority, path, body)
+}
 
-Rules:
-1. ALLOW only if the outbound request is clearly and directly required to fulfill the user's stated intent.
-2. BLOCK if the request sends data to any destination that is not strictly necessary for the user's intent.
-3. If the user asked to read, summarize, or list something, that task does NOT require any outbound POST requests. BLOCK any POST that sends content to a server.
-4. Be suspicious of any POST request that includes sensitive data such as passwords, credentials, budget figures, account IDs, or personal information in the body.
-
-Respond with ONLY a JSON object, no other text:
-{"decision": "ALLOW" or "BLOCK", "reason": "brief explanation"}`,
-		intent, method, authority, path, body)
+// checkIntent uses an LLM to determine if an outbound action aligns with the original intent
+func checkIntent(intent, method, authority, path, body string) (string, string) {
+	action := formatHTTPAction(method, authority, path, body)
+	prompt := fmt.Sprintf(intentPromptTemplate, intent, action)
 
 	llmReq := LLMRequest{
 		Model: "llama3.2:3b",

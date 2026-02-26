@@ -7,5 +7,6 @@ RUN CGO_ENABLED=0 go build -o /sidecar ./sidecar/
 
 FROM alpine:3.19
 COPY --from=builder /sidecar /sidecar
+COPY sidecar/intent_prompt.txt /intent_prompt.txt
 EXPOSE 9090
 CMD ["/sidecar"]
