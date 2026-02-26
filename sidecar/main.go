@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	v3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -20,16 +22,108 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// sessionStore maps sessionID -> original user intent (query)
+// --- Session context tracking ---
+
+type SessionEvent struct {
+	Sequence  int       `json:"sequence"`
+	Direction string    `json:"direction"` // "inbound" or "outbound"
+	Phase     string    `json:"phase"`     // "request" or "response"
+	Method    string    `json:"method"`
+	Authority string    `json:"authority"`
+	Path      string    `json:"path"`
+	Body      string    `json:"body"`   // truncated to 500 chars
+	Action    string    `json:"action"` // what the sidecar did: "captured intent", "logged (trusted)", "BLOCKED", etc.
+	Timestamp time.Time `json:"timestamp"`
+}
+
+type SessionContext struct {
+	OriginalIntent string         `json:"original_intent"`
+	Events         []SessionEvent `json:"events"`
+	mu             sync.Mutex
+}
+
+func (sc *SessionContext) AddEvent(direction, phase, method, authority, path, body string) int {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	// Truncate body to 500 chars
+	if len(body) > 500 {
+		body = body[:500]
+	}
+	idx := len(sc.Events)
+	sc.Events = append(sc.Events, SessionEvent{
+		Sequence:  idx + 1,
+		Direction: direction,
+		Phase:     phase,
+		Method:    method,
+		Authority: authority,
+		Path:      path,
+		Body:      body,
+		Timestamp: time.Now(),
+	})
+	return idx
+}
+
+// SetEventBody updates the body of an existing event (e.g. when RequestBody arrives after RequestHeaders)
+func (sc *SessionContext) SetEventBody(idx int, body string) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if idx < 0 || idx >= len(sc.Events) {
+		return
+	}
+	if len(body) > 500 {
+		body = body[:500]
+	}
+	sc.Events[idx].Body = body
+}
+
+// SetEventAction updates the action field of an existing event
+func (sc *SessionContext) SetEventAction(idx int, action string) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if idx < 0 || idx >= len(sc.Events) {
+		return
+	}
+	sc.Events[idx].Action = action
+}
+
+// sessionStore maps sessionID -> *SessionContext
 var sessionStore sync.Map
+
+// activeSessionID tracks the currently active session for correlating outbound traffic
+// that lacks X-Session-Id headers (e.g., agent→ollama, agent→email-server)
+var activeSessionID atomic.Value
+
+// trustedDestinations are logged but not validated by the LLM
+var trustedDestinations map[string]bool
+
+func initTrustedDestinations() {
+	trustedDestinations = make(map[string]bool)
+	env := os.Getenv("TRUSTED_DESTINATIONS")
+	if env == "" {
+		return
+	}
+	for _, d := range strings.Split(env, ",") {
+		d = strings.TrimSpace(d)
+		if d != "" {
+			trustedDestinations[d] = true
+			log.Printf("[IBAC] Trusted destination: %s", d)
+		}
+	}
+}
+
+func isTrustedDestination(authority string) bool {
+	return trustedDestinations[authority]
+}
 
 // streamState holds per-stream metadata accumulated across headers and body phases
 type streamState struct {
-	direction string
-	sessionID string
-	method    string
-	path      string
-	authority string
+	direction       string
+	sessionID       string
+	method          string
+	path            string
+	authority       string
+	statusCode      int
+	requestEventIdx int // index of request event in SessionContext.Events, -1 if none
 }
 
 type processor struct {
@@ -79,6 +173,69 @@ func allowHeaders() *v3.ProcessingResponse {
 			RequestHeaders: &v3.HeadersResponse{},
 		},
 	}
+}
+
+// allowResponseHeaders returns a response headers response that passes through unchanged
+func allowResponseHeaders() *v3.ProcessingResponse {
+	return &v3.ProcessingResponse{
+		Response: &v3.ProcessingResponse_ResponseHeaders{
+			ResponseHeaders: &v3.HeadersResponse{},
+		},
+	}
+}
+
+// allowResponseBody returns a response body response that passes through unchanged
+func allowResponseBody() *v3.ProcessingResponse {
+	return &v3.ProcessingResponse{
+		Response: &v3.ProcessingResponse_ResponseBody{
+			ResponseBody: &v3.BodyResponse{},
+		},
+	}
+}
+
+// getOrCreateSession returns the SessionContext for a session, creating it if needed
+func getOrCreateSession(sessionID string) *SessionContext {
+	if ctx, ok := sessionStore.Load(sessionID); ok {
+		return ctx.(*SessionContext)
+	}
+	ctx := &SessionContext{}
+	actual, _ := sessionStore.LoadOrStore(sessionID, ctx)
+	return actual.(*SessionContext)
+}
+
+// resolveSessionID returns the session ID from the stream state, falling back to activeSessionID
+func resolveSessionID(state *streamState) string {
+	if state.sessionID != "" {
+		return state.sessionID
+	}
+	if v := activeSessionID.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// formatSessionContext renders session events as a numbered list for the LLM prompt
+func formatSessionContext(sc *SessionContext) string {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	if len(sc.Events) == 0 {
+		return "(no prior activity)"
+	}
+
+	var sb strings.Builder
+	for _, e := range sc.Events {
+		actionStr := ""
+		if e.Action != "" {
+			actionStr = fmt.Sprintf(" => %s", e.Action)
+		}
+		fmt.Fprintf(&sb, "%d. [%s %s] %s %s%s%s\n",
+			e.Sequence, e.Direction, e.Phase, e.Method, e.Authority, e.Path, actionStr)
+		if e.Body != "" {
+			fmt.Fprintf(&sb, "   Body: %s\n", e.Body)
+		}
+	}
+	return sb.String()
 }
 
 // --- LLM-based intent checking ---
@@ -133,9 +290,10 @@ func formatHTTPAction(method, authority, path, body string) string {
 }
 
 // checkIntent uses an LLM to determine if an outbound action aligns with the original intent
-func checkIntent(intent, method, authority, path, body string) (string, string) {
+func checkIntent(sc *SessionContext, method, authority, path, body string) (string, string) {
 	action := formatHTTPAction(method, authority, path, body)
-	prompt := fmt.Sprintf(intentPromptTemplate, intent, action)
+	sessionTrace := formatSessionContext(sc)
+	prompt := fmt.Sprintf(intentPromptTemplate, sc.OriginalIntent, sessionTrace, action)
 
 	llmReq := LLMRequest{
 		Model: "llama3.2:3b",
@@ -213,7 +371,7 @@ func checkIntent(intent, method, authority, path, body string) (string, string) 
 
 func (p *processor) Process(stream v3.ExternalProcessor_ProcessServer) error {
 	ctx := stream.Context()
-	state := &streamState{}
+	state := &streamState{requestEventIdx: -1}
 
 	for {
 		select {
@@ -239,44 +397,85 @@ func (p *processor) Process(stream v3.ExternalProcessor_ProcessServer) error {
 			state.path = getHeaderValue(headers.Headers, ":path")
 			state.authority = getHeaderValue(headers.Headers, ":authority")
 
+			// For outbound: if no session ID in headers, use activeSessionID fallback
+			if state.direction == "outbound" && state.sessionID == "" {
+				state.sessionID = resolveSessionID(state)
+			}
+
 			log.Printf("[IBAC] %s request: session=%s method=%s authority=%s path=%s",
 				state.direction, state.sessionID, state.method, state.authority, state.path)
 
-			// For both inbound and outbound, we pass headers through
-			// and wait for the body phase to do the real work
+			// Log request event (body and action will be updated in RequestBody if it arrives)
+			sessionID := resolveSessionID(state)
+			if sessionID != "" {
+				sc := getOrCreateSession(sessionID)
+				state.requestEventIdx = sc.AddEvent(state.direction, "request", state.method, state.authority, state.path, "")
+				// Set a default action; RequestBody will overwrite with the actual decision
+				if state.direction == "outbound" && isTrustedDestination(state.authority) {
+					sc.SetEventAction(state.requestEventIdx, "ALLOW (trusted)")
+				}
+			}
+
 			resp = allowHeaders()
 
 		case *v3.ProcessingRequest_RequestBody:
 			body := string(r.RequestBody.Body)
+			sessionID := resolveSessionID(state)
+
+			// Update the request event's body (event was created in RequestHeaders)
+			if sessionID != "" && state.requestEventIdx >= 0 {
+				sc := getOrCreateSession(sessionID)
+				sc.SetEventBody(state.requestEventIdx, body)
+			}
 
 			if state.direction == "inbound" {
 				// Inbound: capture the user's intent from the request body
 				var reqBody map[string]interface{}
 				if err := json.Unmarshal([]byte(body), &reqBody); err == nil {
-					if query, ok := reqBody["query"].(string); ok && state.sessionID != "" {
-						sessionStore.Store(state.sessionID, query)
-						log.Printf("[IBAC] Captured intent for session %s: %s", state.sessionID, query)
+					if query, ok := reqBody["query"].(string); ok && sessionID != "" {
+						sc := getOrCreateSession(sessionID)
+						sc.mu.Lock()
+						sc.OriginalIntent = query
+						sc.mu.Unlock()
+						activeSessionID.Store(sessionID)
+						log.Printf("[IBAC] Captured intent for session %s: %s", sessionID, query)
+						sc.SetEventAction(state.requestEventIdx, "captured intent")
 					}
 				}
 				resp = allowBody()
 
 			} else if state.direction == "outbound" {
-				// Outbound: validate the action against the stored intent
-				if state.sessionID == "" {
-					log.Printf("[IBAC] BLOCK: no session ID on outbound request")
-					resp = blockRequest("missing session ID")
-				} else if intent, ok := sessionStore.Load(state.sessionID); !ok {
-					log.Printf("[IBAC] BLOCK: no intent found for session %s", state.sessionID)
-					resp = blockRequest("no intent registered for session")
+				// Check if destination is trusted
+				if isTrustedDestination(state.authority) {
+					log.Printf("[IBAC] Trusted destination %s, logging only", state.authority)
+					if sessionID != "" {
+						getOrCreateSession(sessionID).SetEventAction(state.requestEventIdx, "ALLOW (trusted)")
+					}
+					resp = allowBody()
 				} else {
-					intentStr := intent.(string)
-					decision, reason := checkIntent(intentStr, state.method, state.authority, state.path, body)
-					log.Printf("[IBAC] Decision for session %s: %s - %s", state.sessionID, decision, reason)
-
-					if decision == "ALLOW" {
-						resp = allowBody()
+					// Untrusted destination: validate against session context
+					if sessionID == "" {
+						log.Printf("[IBAC] BLOCK: no session ID on outbound request to untrusted %s", state.authority)
+						resp = blockRequest("missing session ID")
 					} else {
-						resp = blockRequest(reason)
+						sc := getOrCreateSession(sessionID)
+						if sc.OriginalIntent == "" {
+							log.Printf("[IBAC] BLOCK: no intent found for session %s", sessionID)
+							sc.SetEventAction(state.requestEventIdx, "BLOCK (no intent)")
+							resp = blockRequest("no intent registered for session")
+						} else {
+							log.Printf("[IBAC] Session context for %s:\n%s", sessionID, formatSessionContext(sc))
+							decision, reason := checkIntent(sc, state.method, state.authority, state.path, body)
+							log.Printf("[IBAC] Decision for session %s: %s - %s", sessionID, decision, reason)
+
+							if decision == "ALLOW" {
+								sc.SetEventAction(state.requestEventIdx, "ALLOW (validated)")
+								resp = allowBody()
+							} else {
+								sc.SetEventAction(state.requestEventIdx, fmt.Sprintf("BLOCK: %s", reason))
+								resp = blockRequest(reason)
+							}
+						}
 					}
 				}
 			} else {
@@ -286,11 +485,32 @@ func (p *processor) Process(stream v3.ExternalProcessor_ProcessServer) error {
 			}
 
 		case *v3.ProcessingRequest_ResponseHeaders:
-			resp = &v3.ProcessingResponse{
-				Response: &v3.ProcessingResponse_ResponseHeaders{
-					ResponseHeaders: &v3.HeadersResponse{},
-				},
+			resp = allowResponseHeaders()
+
+		case *v3.ProcessingRequest_ResponseBody:
+			body := string(r.ResponseBody.Body)
+			sessionID := resolveSessionID(state)
+
+			// Log response event
+			if sessionID != "" {
+				sc := getOrCreateSession(sessionID)
+				action := "logged"
+				if state.direction == "outbound" && isTrustedDestination(state.authority) {
+					action = "logged (trusted)"
+				}
+				idx := sc.AddEvent(state.direction, "response", state.method, state.authority, state.path, body)
+				sc.SetEventAction(idx, action)
+				log.Printf("[IBAC] Logged %s response for session %s: %s%s (%d bytes)",
+					state.direction, sessionID, state.authority, state.path, len(body))
 			}
+
+			// Clear activeSessionID when inbound response completes
+			if state.direction == "inbound" {
+				activeSessionID.Store("")
+				log.Printf("[IBAC] Cleared active session (inbound response complete)")
+			}
+
+			resp = allowResponseBody()
 
 		default:
 			log.Printf("[IBAC] Unknown request type: %T", r)
@@ -305,6 +525,8 @@ func (p *processor) Process(stream v3.ExternalProcessor_ProcessServer) error {
 
 func main() {
 	log.Println("[IBAC] Starting ext_proc sidecar on :9090")
+
+	initTrustedDestinations()
 
 	lis, err := net.Listen("tcp", ":9090")
 	if err != nil {

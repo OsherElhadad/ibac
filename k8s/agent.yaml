@@ -19,6 +19,31 @@ spec:
       labels:
         app: ibac-agent
     spec:
+      initContainers:
+      - name: iptables-init
+        image: alpine:3.19
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          apk add --no-cache iptables
+          # Create IBAC_REDIRECT chain
+          iptables -t nat -N IBAC_REDIRECT
+          # Don't redirect Envoy's own outbound (uid 101) — prevents infinite loop
+          iptables -t nat -A IBAC_REDIRECT -m owner --uid-owner 101 -j RETURN
+          # Don't redirect sidecar's outbound (uid 1001) — it calls ollama directly
+          iptables -t nat -A IBAC_REDIRECT -m owner --uid-owner 1001 -j RETURN
+          # Don't redirect localhost traffic (pod-internal: agent↔envoy↔sidecar)
+          iptables -t nat -A IBAC_REDIRECT -d 127.0.0.1/32 -j RETURN
+          # Redirect everything else to Envoy outbound listener
+          iptables -t nat -A IBAC_REDIRECT -p tcp -j REDIRECT --to-port 10001
+          # Apply to OUTPUT chain
+          iptables -t nat -A OUTPUT -p tcp -j IBAC_REDIRECT
+          echo "iptables rules installed"
+          iptables -t nat -L IBAC_REDIRECT -v -n
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+          runAsUser: 0
       containers:
       - name: agent
         image: localhost/ibac-agent:latest
@@ -26,8 +51,6 @@ spec:
         ports:
         - containerPort: 8080
         env:
-        - name: IBAC_PROXY
-          value: "http://localhost:10001"
         - name: EMAIL_URL
           value: "http://email-server.ibac.svc.cluster.local:8888"
         - name: OLLAMA_URL
@@ -41,6 +64,8 @@ spec:
         - name: envoy-config
           mountPath: /etc/envoy
         command: ["envoy", "-c", "/etc/envoy/envoy.yaml"]
+        securityContext:
+          runAsUser: 101
       - name: sidecar
         image: localhost/ibac-sidecar:latest
         imagePullPolicy: IfNotPresent
@@ -49,6 +74,10 @@ spec:
         env:
         - name: OLLAMA_URL
           value: "http://host.docker.internal:11434"
+        - name: TRUSTED_DESTINATIONS
+          value: "host.docker.internal:11434,email-server.ibac.svc.cluster.local:8888"
+        securityContext:
+          runAsUser: 1001
       volumes:
       - name: envoy-config
         configMap:
