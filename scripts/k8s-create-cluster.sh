@@ -25,6 +25,40 @@ fi
 echo "Creating kind cluster '${CLUSTER_NAME}'..."
 kind create cluster --name "$CLUSTER_NAME" --config "$ROOT_DIR/kind-config.yaml"
 
+# Add host.docker.internal to /etc/hosts in the kind node
+echo "Configuring host.docker.internal..."
+
+# On macOS with Docker Desktop, we need to use the special host.docker.internal that Docker provides
+# First, try to get it from the Docker VM
+if docker run --rm alpine getent hosts host.docker.internal &>/dev/null; then
+  # Docker Desktop provides host.docker.internal automatically
+  HOST_IP=$(docker run --rm alpine getent hosts host.docker.internal | awk '{print $1}')
+  echo "Using Docker Desktop's host.docker.internal: $HOST_IP"
+else
+  # Fallback: use the gateway IP
+  HOST_IP=$(docker network inspect kind | jq -r '.[0].IPAM.Config[0].Gateway')
+  if [ -z "$HOST_IP" ] || [ "$HOST_IP" = "null" ]; then
+    HOST_IP=$(docker exec "${CLUSTER_NAME}-control-plane" ip route | grep default | awk '{print $3}')
+  fi
+  echo "Using gateway IP: $HOST_IP"
+fi
+
+if [ -n "$HOST_IP" ] && [ "$HOST_IP" != "null" ]; then
+  echo "Adding host.docker.internal -> $HOST_IP to kind node..."
+  docker exec "${CLUSTER_NAME}-control-plane" sh -c "echo '$HOST_IP host.docker.internal' >> /etc/hosts"
+  
+  # Also test if we can reach the host
+  echo "Testing connectivity to host..."
+  if docker exec "${CLUSTER_NAME}-control-plane" sh -c "command -v nc >/dev/null && nc -zv $HOST_IP 11434 2>&1" | grep -q succeeded; then
+    echo "✓ Successfully connected to ollama at $HOST_IP:11434"
+  else
+    echo "⚠ Warning: Could not connect to ollama at $HOST_IP:11434"
+    echo "  Make sure ollama is running with: OLLAMA_HOST=0.0.0.0:11434 ollama serve"
+  fi
+else
+  echo "ERROR: Could not determine host IP. host.docker.internal may not work."
+fi
+
 echo ""
 echo "Cluster '${CLUSTER_NAME}' is ready."
 echo "Run 'make deploy' to build images and deploy resources."

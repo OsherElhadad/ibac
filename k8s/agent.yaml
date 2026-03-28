@@ -19,13 +19,17 @@ spec:
       labels:
         app: ibac-agent
     spec:
+      hostAliases:
+      - ip: "172.20.0.3"
+        hostnames:
+        - "ibac-ollama"
       initContainers:
       - name: iptables-init
-        image: alpine:3.19
+        image: localhost/ibac-iptables-init:latest
+        imagePullPolicy: IfNotPresent
         command: ["/bin/sh", "-c"]
         args:
         - |
-          apk add --no-cache iptables
           # Create IBAC_REDIRECT chain
           iptables -t nat -N IBAC_REDIRECT
           # Don't redirect Envoy's own outbound (uid 101) — prevents infinite loop
@@ -54,7 +58,7 @@ spec:
         - name: EMAIL_URL
           value: "http://email-server.ibac.svc.cluster.local:8888"
         - name: OLLAMA_URL
-          value: "http://host.docker.internal:11434"
+          value: "http://ibac-ollama:11434"
       - name: envoy
         image: envoyproxy/envoy:v1.28-latest
         ports:
@@ -73,7 +77,7 @@ spec:
         - containerPort: 9090
         env:
         - name: OLLAMA_URL
-          value: "http://host.docker.internal:11434"
+          value: "http://ibac-ollama:11434"
         - name: TRUSTED_DESTINATIONS
           value: "host.docker.internal:11434,email-server.ibac.svc.cluster.local:8888"
         securityContext:
@@ -99,6 +103,10 @@ spec:
       labels:
         app: agent-no-ibac
     spec:
+      hostAliases:
+      - ip: "172.20.0.3"
+        hostnames:
+        - "ibac-ollama"
       containers:
       - name: agent
         image: localhost/ibac-agent:latest
@@ -109,7 +117,7 @@ spec:
         - name: EMAIL_URL
           value: "http://email-server.ibac.svc.cluster.local:8888"
         - name: OLLAMA_URL
-          value: "http://host.docker.internal:11434"
+          value: "http://ibac-ollama:11434"
 ---
 # NodePort service for IBAC agent (via envoy inbound)
 apiVersion: v1

@@ -106,22 +106,67 @@ else
   echo "Email-server image up to date, skipping."
 fi
 
-# Combine both arrays for loading into kind
+# --- iptables-init ---
+if needs_build iptables-init "$ROOT_DIR"/Dockerfile.iptables-init; then
+  echo "Building iptables-init image..."
+  podman build -t localhost/ibac-iptables-init:latest -f "$ROOT_DIR/Dockerfile.iptables-init" "$ROOT_DIR"
+  BUILD_IMAGES+=(localhost/ibac-iptables-init:latest)
+elif needs_load "localhost/ibac-iptables-init:latest"; then
+  echo "Iptables-init image missing from kind cluster, will load."
+  LOAD_IMAGES+=(localhost/ibac-iptables-init:latest)
+else
+  echo "Iptables-init image up to date, skipping."
+fi
+
+# --- External images (envoy) ---
+# Check if external images need to be loaded into kind
+EXTERNAL_IMAGES=()
+
+if needs_load "envoyproxy/envoy:v1.28-latest"; then
+  echo "Envoy image missing from kind cluster, will load."
+  # Pull to podman if not present
+  if ! podman image exists "envoyproxy/envoy:v1.28-latest" 2>/dev/null; then
+    echo "Pulling envoyproxy/envoy:v1.28-latest to podman..."
+    podman pull envoyproxy/envoy:v1.28-latest
+  fi
+  EXTERNAL_IMAGES+=(envoyproxy/envoy:v1.28-latest)
+else
+  echo "Envoy image present in kind cluster, skipping."
+fi
+
+# Combine all arrays for loading into kind
 ALL_LOAD=()
 ALL_LOAD+=(${BUILD_IMAGES[@]+"${BUILD_IMAGES[@]}"})
 ALL_LOAD+=(${LOAD_IMAGES[@]+"${LOAD_IMAGES[@]}"})
+ALL_LOAD+=(${EXTERNAL_IMAGES[@]+"${EXTERNAL_IMAGES[@]}"})
+
 if [ ${#ALL_LOAD[@]} -gt 0 ]; then
   echo "Loading ${#ALL_LOAD[@]} image(s) into kind cluster..."
   for img in "${ALL_LOAD[@]}"; do
-    kind load docker-image "$img" --name "$CLUSTER_NAME"
+    tmp_tar="$(mktemp "/tmp/ibac-image-XXXXXX.tar")"
+    echo "Saving $img to archive..."
+    podman save -o "$tmp_tar" "$img"
+    echo "Loading $img into kind cluster..."
+    kind load image-archive "$tmp_tar" --name "$CLUSTER_NAME"
+    rm -f "$tmp_tar"
   done
 else
   echo "All images up to date, nothing to load."
 fi
 
-# Apply manifests (agent.yaml first — it creates the ibac namespace)
+# Get the ollama container IP
+OLLAMA_IP=$(docker inspect ibac-ollama -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null)
+
+if [ -z "$OLLAMA_IP" ]; then
+  echo "ERROR: ibac-ollama container not found. Please run: docker run -d --name ibac-ollama --network kind -p 11434:11434 -v ollama-data:/root/.ollama ollama/ollama:latest"
+  exit 1
+fi
+
+echo "Using ollama container IP $OLLAMA_IP"
+
+# Apply manifests with IP substitution
 echo "Applying Kubernetes manifests..."
-kubectl apply -f "$ROOT_DIR/k8s/agent.yaml"
+sed "s/172\.20\.0\.3/$OLLAMA_IP/g" "$ROOT_DIR/k8s/agent.yaml" | kubectl apply -f -
 kubectl apply -f "$ROOT_DIR/k8s/envoy-config.yaml"
 kubectl apply -f "$ROOT_DIR/k8s/evil-server.yaml"
 kubectl apply -f "$ROOT_DIR/k8s/email-server.yaml"
@@ -133,11 +178,12 @@ if [ ${#BUILD_IMAGES[@]} -gt 0 ]; then
   echo "Restarting pods to pick up new images..."
   for img in "${BUILD_IMAGES[@]}"; do
     case "$img" in
-      *agent:*)      kubectl -n ibac delete pod -l app=ibac-agent --ignore-not-found
-                     kubectl -n ibac delete pod -l app=agent-no-ibac --ignore-not-found ;;
-      *sidecar:*)    kubectl -n ibac delete pod -l app=ibac-agent --ignore-not-found ;;
-      *evil-server:*) kubectl -n ibac delete pod -l app=evil-server --ignore-not-found ;;
-      *email-server:*) kubectl -n ibac delete pod -l app=email-server --ignore-not-found ;;
+      *agent:*)         kubectl -n ibac delete pod -l app=ibac-agent --ignore-not-found
+                        kubectl -n ibac delete pod -l app=agent-no-ibac --ignore-not-found ;;
+      *sidecar:*)       kubectl -n ibac delete pod -l app=ibac-agent --ignore-not-found ;;
+      *iptables-init:*) kubectl -n ibac delete pod -l app=ibac-agent --ignore-not-found ;;
+      *evil-server:*)   kubectl -n ibac delete pod -l app=evil-server --ignore-not-found ;;
+      *email-server:*)  kubectl -n ibac delete pod -l app=email-server --ignore-not-found ;;
     esac
   done
 fi

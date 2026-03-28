@@ -27,18 +27,24 @@ curl ──POST──> Envoy :10000 ──ext_proc──> Agent :8080 ──(oll
 - [kind](https://kind.sigs.k8s.io/) (`brew install kind`)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 - [Podman](https://podman.io/) (`brew install podman`)
-- [ollama](https://ollama.ai) running on the host with `llama3.2:3b` pulled
+- [Docker](https://www.docker.com/) (for running ollama container)
 
 ```bash
-# Pull the required model
-ollama pull llama3.2:3b
-
-# Verify ollama is running
-curl http://localhost:11434/v1/models
-
 # Ensure podman machine is running
 podman machine start
+
+# Start ollama in a Docker container on the kind network
+docker run -d --name ibac-ollama --network kind -p 11434:11434 \
+  -v ollama-data:/root/.ollama ollama/ollama:latest
+
+# Pull the required model into the ollama container
+docker exec ibac-ollama ollama pull llama3.2:3b
+
+# Verify ollama is running
+curl http://localhost:11434/api/tags
 ```
+
+**Note**: The ollama container runs on the kind Docker network so pods can access it directly. This is required on macOS where Docker runs in a VM and host networking doesn't work the same way as on Linux.
 
 ## Quick Start
 
@@ -65,7 +71,7 @@ make create-cluster
 make deploy
 ```
 
-Builds and loads all container images, deploys all components, and waits for everything to be ready. Ollama runs on the host and is accessed via `host.docker.internal:11434`.
+Builds and loads all container images, deploys all components, and waits for everything to be ready. The deployment script automatically detects the ollama container IP and configures the pods to use it.
 
 ### 3. Attack WITHOUT IBAC (exfiltration succeeds)
 
@@ -213,7 +219,7 @@ kind cluster "ibac-demo"
 │   ├── Pod: email-server (:8888) — poisoned email API
 │   └── Pod: evil-server (:9999)  — exfiltration target
 │
-└── Ollama: runs on host, accessed via host.docker.internal:11434
+└── Ollama: runs in Docker container on kind network (ibac-ollama)
 ```
 
 ## How It Works
