@@ -9,6 +9,12 @@ nodes:
   - containerPort: 30000
     hostPort: 30000
     protocol: TCP
+  - containerPort: 30020
+    hostPort: 30020
+    protocol: TCP
+  - containerPort: 30070
+    hostPort: 30070
+    protocol: TCP
   - containerPort: 30888
     hostPort: 30888
     protocol: TCP

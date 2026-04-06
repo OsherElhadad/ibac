@@ -1,23 +1,57 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ibac
----
-# IBAC-protected agent: agent + envoy + sidecar in one pod
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ibac-agent
+  name: finance-backend
   namespace: ibac
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: ibac-agent
+      app: finance-backend
   template:
     metadata:
       labels:
-        app: ibac-agent
+        app: finance-backend
+    spec:
+      containers:
+      - name: finance-backend
+        image: localhost/ibac-finance-backend:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8181
+        env:
+        - name: AUDIT_URL
+          value: "http://audit-acme-payments.ibac.svc.cluster.local:9999/log"
+        - name: OBSERVER_URL
+          value: "http://demo-observer.ibac.svc.cluster.local:7070"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: finance-backend
+  namespace: ibac
+spec:
+  selector:
+    app: finance-backend
+  ports:
+  - port: 8181
+    targetPort: 8181
+    name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: finance-agent
+  namespace: ibac
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: finance-agent
+  template:
+    metadata:
+      labels:
+        app: finance-agent
     spec:
       hostAliases:
       - ip: "172.20.0.3"
@@ -30,17 +64,11 @@ spec:
         command: ["/bin/sh", "-c"]
         args:
         - |
-          # Create IBAC_REDIRECT chain
           iptables -t nat -N IBAC_REDIRECT
-          # Don't redirect Envoy's own outbound (uid 101) — prevents infinite loop
           iptables -t nat -A IBAC_REDIRECT -m owner --uid-owner 101 -j RETURN
-          # Don't redirect sidecar's outbound (uid 1001) — it calls ollama directly
           iptables -t nat -A IBAC_REDIRECT -m owner --uid-owner 1001 -j RETURN
-          # Don't redirect localhost traffic (pod-internal: agent↔envoy↔sidecar)
           iptables -t nat -A IBAC_REDIRECT -d 127.0.0.1/32 -j RETURN
-          # Redirect everything else to Envoy outbound listener
           iptables -t nat -A IBAC_REDIRECT -p tcp -j REDIRECT --to-port 10001
-          # Apply to OUTPUT chain
           iptables -t nat -A OUTPUT -p tcp -j IBAC_REDIRECT
           echo "iptables rules installed"
           iptables -t nat -L IBAC_REDIRECT -v -n
@@ -49,14 +77,18 @@ spec:
             add: ["NET_ADMIN"]
           runAsUser: 0
       containers:
-      - name: agent
-        image: localhost/ibac-agent:latest
+      - name: finance-agent
+        image: localhost/ibac-finance-agent:latest
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
         env:
-        - name: EMAIL_URL
-          value: "http://email-server.ibac.svc.cluster.local:8888"
+        - name: FINANCE_BACKEND_URL
+          value: "http://finance-backend.ibac.svc.cluster.local:8181"
+        - name: SPARC_URL
+          value: "http://sparc-reflector.ibac.svc.cluster.local:8090"
+        - name: OBSERVER_URL
+          value: "http://demo-observer.ibac.svc.cluster.local:7070"
         - name: OLLAMA_URL
           value: "http://ibac-ollama:11434"
       - name: envoy
@@ -78,8 +110,10 @@ spec:
         env:
         - name: OLLAMA_URL
           value: "http://ibac-ollama:11434"
+        - name: OBSERVER_URL
+          value: "http://demo-observer.ibac.svc.cluster.local:7070"
         - name: TRUSTED_DESTINATIONS
-          value: "ibac-ollama:11434,host.docker.internal:11434,email-server.ibac.svc.cluster.local:8888"
+          value: "ibac-ollama:11434,host.docker.internal:11434,finance-backend.ibac.svc.cluster.local:8181,sparc-reflector.ibac.svc.cluster.local:8090,demo-observer.ibac.svc.cluster.local:7070"
         securityContext:
           runAsUser: 1001
       volumes:
@@ -87,66 +121,30 @@ spec:
         configMap:
           name: envoy-config
 ---
-# Agent without IBAC protection (for comparison demo)
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: agent-no-ibac
-  namespace: ibac
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: agent-no-ibac
-  template:
-    metadata:
-      labels:
-        app: agent-no-ibac
-    spec:
-      hostAliases:
-      - ip: "172.20.0.3"
-        hostnames:
-        - "ibac-ollama"
-      containers:
-      - name: agent
-        image: localhost/ibac-agent:latest
-        imagePullPolicy: IfNotPresent
-        ports:
-        - containerPort: 8080
-        env:
-        - name: EMAIL_URL
-          value: "http://email-server.ibac.svc.cluster.local:8888"
-        - name: OLLAMA_URL
-          value: "http://ibac-ollama:11434"
----
-# NodePort service for IBAC agent (via envoy inbound)
 apiVersion: v1
 kind: Service
 metadata:
-  name: ibac-agent
+  name: finance-agent
   namespace: ibac
 spec:
   type: NodePort
   selector:
-    app: ibac-agent
+    app: finance-agent
   ports:
   - port: 10000
     targetPort: 10000
-    nodePort: 30000
+    nodePort: 30020
     name: envoy-inbound
 ---
-# NodePort service for agent without IBAC
 apiVersion: v1
 kind: Service
 metadata:
-  name: agent-no-ibac
+  name: audit-acme-payments
   namespace: ibac
 spec:
-  type: NodePort
   selector:
-    app: agent-no-ibac
+    app: evil-server
   ports:
-  - port: 8080
-    targetPort: 8080
-    nodePort: 30080
+  - port: 9999
+    targetPort: 9999
     name: http

@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/huang195/ibac/internal/demo"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	v3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
@@ -92,6 +93,7 @@ var sessionStore sync.Map
 // activeSessionID tracks the currently active session for correlating outbound traffic
 // that lacks X-Session-Id headers (e.g., agent→ollama, agent→email-server)
 var activeSessionID atomic.Value
+var eventEmitter = demo.NewEventEmitterFromEnv()
 
 // trustedDestinations are logged but not validated by the LLM
 var trustedDestinations map[string]bool
@@ -238,6 +240,22 @@ func formatSessionContext(sc *SessionContext) string {
 	return sb.String()
 }
 
+func emitIBACEvent(sessionID, stage, status, title, summary, rawLog string, data map[string]any) {
+	if eventEmitter == nil || sessionID == "" {
+		return
+	}
+	eventEmitter.Emit(demo.Event{
+		SessionID: sessionID,
+		Source:    "ibac",
+		Stage:     stage,
+		Status:    status,
+		Title:     title,
+		Summary:   summary,
+		Data:      data,
+		RawLog:    rawLog,
+	})
+}
+
 // --- LLM-based intent checking ---
 
 type LLMRequest struct {
@@ -289,8 +307,62 @@ func formatHTTPAction(method, authority, path, body string) string {
 - Body (first 500 chars): %.500s`, method, authority, path, body)
 }
 
+func lowerContains(haystack, needle string) bool {
+	if needle == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(haystack), strings.ToLower(needle))
+}
+
+func intentMentionsDestination(intent, authority, path string) bool {
+	host := strings.Split(authority, ":")[0]
+	return lowerContains(intent, authority) || lowerContains(intent, host) || (path != "" && path != "/" && lowerContains(intent, path))
+}
+
+func traceIntroducedDestination(sc *SessionContext, authority, path string) bool {
+	fullDestination := authority + path
+	host := strings.Split(authority, ":")[0]
+
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	for _, event := range sc.Events {
+		if lowerContains(event.Body, fullDestination) || lowerContains(event.Body, authority) || lowerContains(event.Body, host) {
+			return true
+		}
+	}
+	return false
+}
+
+func preflightIntentDecision(sc *SessionContext, method, authority, path, body string) (string, string, bool) {
+	upperMethod := strings.ToUpper(method)
+	switch upperMethod {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+	default:
+		return "", "", false
+	}
+
+	if intentMentionsDestination(sc.OriginalIntent, authority, path) {
+		return "", "", false
+	}
+
+	if traceIntroducedDestination(sc, authority, path) {
+		return "BLOCK", "Outbound write target was introduced by retrieved content, not by the user. Treating this as prompt injection and blocking the request.", true
+	}
+
+	if lowerContains(sc.OriginalIntent, "process invoice") && (lowerContains(body, "invoice_id") || lowerContains(body, "amount")) {
+		return "BLOCK", "Processing an invoice does not authorize sending invoice data to a new outbound destination that the user never named.", true
+	}
+
+	return "", "", false
+}
+
 // checkIntent uses an LLM to determine if an outbound action aligns with the original intent
 func checkIntent(sc *SessionContext, method, authority, path, body string) (string, string) {
+	if decision, reason, ok := preflightIntentDecision(sc, method, authority, path, body); ok {
+		return decision, reason
+	}
+
 	action := formatHTTPAction(method, authority, path, body)
 	sessionTrace := formatSessionContext(sc)
 	prompt := fmt.Sprintf(intentPromptTemplate, sc.OriginalIntent, sessionTrace, action)
@@ -440,6 +512,9 @@ func (p *processor) Process(stream v3.ExternalProcessor_ProcessServer) error {
 						activeSessionID.Store(sessionID)
 						log.Printf("[IBAC] Captured intent for session %s: %s", sessionID, query)
 						sc.SetEventAction(state.requestEventIdx, "captured intent")
+						emitIBACEvent(sessionID, "intent_capture", "info", "Captured user intent", query, fmt.Sprintf("intent=%s", query), map[string]any{
+							"query": query,
+						})
 					}
 				}
 				resp = allowBody()
@@ -450,23 +525,54 @@ func (p *processor) Process(stream v3.ExternalProcessor_ProcessServer) error {
 					log.Printf("[IBAC] Trusted destination %s, logging only", state.authority)
 					if sessionID != "" {
 						getOrCreateSession(sessionID).SetEventAction(state.requestEventIdx, "ALLOW (trusted)")
+						emitIBACEvent(sessionID, "outbound_intercept", "info", "Trusted outbound request", fmt.Sprintf("Allowed trusted destination %s.", state.authority), fmt.Sprintf("%s %s%s", state.method, state.authority, state.path), map[string]any{
+							"authority": state.authority,
+							"method":    state.method,
+							"path":      state.path,
+						})
 					}
 					resp = allowBody()
 				} else {
 					// Untrusted destination: validate against session context
+					if sessionID != "" {
+						emitIBACEvent(sessionID, "outbound_intercept", "started", "Intercepted outbound request", fmt.Sprintf("Intercepted outbound request to %s%s.", state.authority, state.path), fmt.Sprintf("%s %s%s", state.method, state.authority, state.path), map[string]any{
+							"authority": state.authority,
+							"method":    state.method,
+							"path":      state.path,
+						})
+					}
 					if sessionID == "" {
 						log.Printf("[IBAC] BLOCK: no session ID on outbound request to untrusted %s", state.authority)
+						emitIBACEvent(sessionID, "decision", "blocked", "Blocked outbound request", "Blocked an outbound request with no session ID.", fmt.Sprintf("%s %s%s", state.method, state.authority, state.path), map[string]any{
+							"authority": state.authority,
+						})
 						resp = blockRequest("missing session ID")
 					} else {
 						sc := getOrCreateSession(sessionID)
 						if sc.OriginalIntent == "" {
 							log.Printf("[IBAC] BLOCK: no intent found for session %s", sessionID)
 							sc.SetEventAction(state.requestEventIdx, "BLOCK (no intent)")
+							emitIBACEvent(sessionID, "decision", "blocked", "Blocked outbound request", "Blocked an outbound request because no intent was registered.", fmt.Sprintf("%s %s%s", state.method, state.authority, state.path), map[string]any{
+								"authority": state.authority,
+							})
 							resp = blockRequest("no intent registered for session")
 						} else {
 							log.Printf("[IBAC] Session context for %s:\n%s", sessionID, formatSessionContext(sc))
 							decision, reason := checkIntent(sc, state.method, state.authority, state.path, body)
 							log.Printf("[IBAC] Decision for session %s: %s - %s", sessionID, decision, reason)
+							status := "success"
+							title := "Allowed outbound request"
+							if decision != "ALLOW" {
+								status = "blocked"
+								title = "Blocked outbound request"
+							}
+							emitIBACEvent(sessionID, "decision", status, title, reason, fmt.Sprintf("%s %s%s", state.method, state.authority, state.path), map[string]any{
+								"authority": state.authority,
+								"method":    state.method,
+								"path":      state.path,
+								"decision":  decision,
+								"reason":    reason,
+							})
 
 							if decision == "ALLOW" {
 								sc.SetEventAction(state.requestEventIdx, "ALLOW (validated)")

@@ -59,6 +59,11 @@ else
   echo "ERROR: Could not determine host IP. host.docker.internal may not work."
 fi
 
+echo "Configuring CoreDNS upstream resolvers..."
+kubectl -n kube-system patch configmap coredns --type merge -p '{"data":{"Corefile":".:53 {\n    errors\n    health {\n       lameduck 5s\n    }\n    ready\n    kubernetes cluster.local in-addr.arpa ip6.arpa {\n       pods insecure\n       fallthrough in-addr.arpa ip6.arpa\n       ttl 30\n    }\n    prometheus :9153\n    forward . 8.8.8.8 1.1.1.1 {\n       max_concurrent 1000\n    }\n    cache 30 {\n       disable success cluster.local\n       disable denial cluster.local\n    }\n    loop\n    reload\n    loadbalance\n}\n"}}' >/dev/null
+kubectl -n kube-system rollout restart deployment/coredns >/dev/null
+kubectl -n kube-system rollout status deployment/coredns --timeout=120s >/dev/null
+
 echo ""
 echo "Cluster '${CLUSTER_NAME}' is ready."
 echo "Run 'make deploy' to build images and deploy resources."

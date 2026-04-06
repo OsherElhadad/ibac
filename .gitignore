@@ -1,2 +1,7 @@
 bin/
 .build-hashes/
+.runtime/
+__pycache__/
+*.py[cod]
+.env
+presentations/~$IBAC-Agentic-Security.pptx

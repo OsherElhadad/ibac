@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IBAC Finance Demo</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <p class="eyebrow">Sequential Attack Chain</p>
+          <h1>IBAC Finance Demo</h1>
+          <p class="subtle">Live SPARC + IBAC pipeline view</p>
+        </div>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Sessions</h2>
+            <button id="refreshSessions" class="ghost-button" type="button">Refresh</button>
+          </div>
+          <div id="sessionList" class="session-list empty-state">
+            Waiting for demo sessions...
+          </div>
+        </section>
+
+        <section class="panel legend-panel">
+          <h2>Stages</h2>
+          <div class="legend-grid">
+            <span class="legend-chip user">User</span>
+            <span class="legend-chip agent">Finance Agent</span>
+            <span class="legend-chip sparc">SPARC</span>
+            <span class="legend-chip backend">Finance Backend</span>
+            <span class="legend-chip ibac">IBAC</span>
+            <span class="legend-chip network">Network</span>
+          </div>
+        </section>
+
+        <section class="panel architecture-panel">
+          <div class="panel-head compact-head">
+            <h2>Services</h2>
+            <span class="subtle">Cluster and host entry points</span>
+          </div>
+          <div class="service-list">
+            <article class="service-card">
+              <h3>Finance Agent</h3>
+              <p>Protected agent behind Envoy + IBAC sidecar.</p>
+              <code>localhost:30020</code>
+            </article>
+            <article class="service-card">
+              <h3>Observer UI</h3>
+              <p>Live pipeline dashboard and replay API.</p>
+              <code>localhost:30070</code>
+            </article>
+            <article class="service-card">
+              <h3>SPARC Reflector</h3>
+              <p>Cluster service, host relay worker, Watsonx-backed.</p>
+              <code>sparc-reflector:8090</code>
+            </article>
+            <article class="service-card">
+              <h3>Finance Backend</h3>
+              <p>Transactions, customers, refunds, invoices.</p>
+              <code>finance-backend:8181</code>
+            </article>
+            <article class="service-card">
+              <h3>IBAC Sidecar</h3>
+              <p>Intent capture and outbound policy enforcement.</p>
+              <code>sidecar:9090</code>
+            </article>
+            <article class="service-card">
+              <h3>Envoy</h3>
+              <p>Inbound and outbound transparent interception.</p>
+              <code>10000 / 10001</code>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel architecture-panel">
+          <div class="panel-head compact-head">
+            <h2>Pipeline</h2>
+            <span class="subtle">What the demo is showing</span>
+          </div>
+          <ol class="pipeline-list">
+            <li>User asks for a refund with a partial transaction ID.</li>
+            <li>Finance agent proposes a tool call and SPARC reflects before execution.</li>
+            <li>SPARC blocks the hallucinated ID and the agent asks for clarification.</li>
+            <li>User provides the full ID, then the refund chain completes through backend tools.</li>
+            <li>User later asks to process an invoice that contains a malicious outbound instruction.</li>
+            <li>IBAC intercepts the resulting POST and blocks it as prompt injection.</li>
+          </ol>
+        </section>
+      </aside>
+
+      <main class="main-panel">
+        <section class="hero">
+          <div>
+            <p class="eyebrow">Live Replay Dashboard</p>
+            <h2 id="sessionTitle">Select a session</h2>
+            <p id="sessionMeta" class="subtle">Run <code>make demo-finance</code> and the pipeline will appear here.</p>
+          </div>
+          <div id="summaryBanner" class="summary-banner neutral">
+            Waiting for events
+          </div>
+        </section>
+
+        <section class="panel topology-panel">
+          <div class="panel-head">
+            <h2>Architecture</h2>
+            <span class="subtle">Ports, services, and trust boundaries</span>
+          </div>
+          <div class="topology-grid">
+            <article class="topology-card">
+              <h3>Ingress</h3>
+              <p>User traffic enters the protected finance demo through Envoy.</p>
+              <code>Browser / curl -> localhost:30020 -> Envoy :10000 -> finance-agent :8080</code>
+            </article>
+            <article class="topology-card">
+              <h3>Pre-Tool Guard</h3>
+              <p>SPARC runs before first-party finance tools only.</p>
+              <code>finance-agent -> sparc-reflector:8090 -> host worker -> Watsonx</code>
+            </article>
+            <article class="topology-card">
+              <h3>Business Tools</h3>
+              <p>Trusted backend for transactions, customers, refunds, and invoices.</p>
+              <code>finance-backend:8181</code>
+            </article>
+            <article class="topology-card">
+              <h3>Outbound Guard</h3>
+              <p>IBAC validates outbound HTTP against captured user intent.</p>
+              <code>finance-agent -> Envoy :10001 -> sidecar :9090</code>
+            </article>
+            <article class="topology-card">
+              <h3>Malicious Target</h3>
+              <p>Invoice text injects a fake audit callback destination.</p>
+              <code>audit-acme-payments:9999</code>
+            </article>
+            <article class="topology-card">
+              <h3>Observer</h3>
+              <p>Every service emits structured events here for replay.</p>
+              <code>localhost:30070 / demo-observer:7070</code>
+            </article>
+          </div>
+        </section>
+
+        <section class="conversation-section panel">
+          <div class="panel-head">
+            <h2>Conversation</h2>
+            <span class="subtle">User requests, tool calls, tool outputs, and agent replies</span>
+          </div>
+          <div id="conversationFeed" class="conversation-feed empty-state">No conversation yet.</div>
+        </section>
+
+        <section class="timeline-section panel">
+          <div class="panel-head">
+            <h2>Pipeline Timeline</h2>
+            <span id="liveBadge" class="live-badge hidden">Live</span>
+          </div>
+          <div id="timelineColumns" class="timeline-columns"></div>
+        </section>
+
+        <section class="logs-section panel">
+          <div class="panel-head">
+            <h2>Raw Logs</h2>
+            <span class="subtle">Structured timeline on top, evidence detail below</span>
+          </div>
+          <div id="logGroups" class="log-groups empty-state">No logs yet.</div>
+        </section>
+      </main>
+    </div>
+
+    <template id="sessionItemTemplate">
+      <button class="session-item" type="button">
+        <span class="session-title"></span>
+        <span class="session-meta"></span>
+      </button>
+    </template>
+
+    <template id="eventCardTemplate">
+      <article class="event-card">
+        <div class="event-status-row">
+          <span class="event-status"></span>
+          <span class="event-time"></span>
+        </div>
+        <h3 class="event-title"></h3>
+        <p class="event-summary"></p>
+        <p class="event-preview hidden"></p>
+        <button class="event-toggle hidden" type="button">View JSON</button>
+        <pre class="event-data hidden"></pre>
+      </article>
+    </template>
+
+    <template id="conversationItemTemplate">
+      <article class="conversation-item">
+        <div class="conversation-meta">
+          <span class="conversation-speaker"></span>
+          <span class="conversation-time"></span>
+        </div>
+        <div class="conversation-kind"></div>
+        <p class="conversation-text"></p>
+      </article>
+    </template>
+
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

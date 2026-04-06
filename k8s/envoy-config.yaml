@@ -38,6 +38,7 @@ data:
                       prefix: "/"
                     route:
                       cluster: agent_cluster
+                      timeout: 300s
               http_filters:
               # Lua filter to inject direction header
               - name: envoy.filters.http.lua
@@ -89,6 +90,7 @@ data:
                       prefix: "/"
                     route:
                       cluster: dynamic_forward_proxy_cluster
+                      timeout: 300s
               http_filters:
               # Lua filter to inject direction header
               - name: envoy.filters.http.lua

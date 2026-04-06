@@ -1,0 +1,12 @@
+FROM golang:1.23-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY finance-backend/ finance-backend/
+COPY internal/ internal/
+RUN CGO_ENABLED=0 go build -o /finance-backend ./finance-backend/
+
+FROM alpine:3.19
+COPY --from=builder /finance-backend /finance-backend
+EXPOSE 8181
+CMD ["/finance-backend"]
