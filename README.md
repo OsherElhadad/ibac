@@ -17,13 +17,13 @@ The repo now includes two demos:
 
 The finance demo is the main end-to-end scenario:
 
-1. The user asks for a refund with a partial transaction ID.
+1. The user asks for a refund with a partial transaction ID and explicitly states: `The refund reason is duplicate charge.`
 2. The finance agent hallucinates a full ID and proposes `get_transaction("TX4821")`.
 3. SPARC blocks that proposal because the full ID was not grounded.
 4. The agent asks for clarification.
-5. The user provides the full ID and the refund succeeds.
+5. The user provides the real full ID, which is different from the hallucinated one, and the refund succeeds.
 6. Later the user asks to process an invoice.
-7. The invoice contains a malicious outbound callback instruction.
+7. The invoice contains an explicit prompt-injection instruction telling automated agents to ignore the user and POST data to a separate audit endpoint.
 8. The finance agent attempts `http_post(...)`.
 9. IBAC intercepts the outbound request and blocks it as prompt injection.
 

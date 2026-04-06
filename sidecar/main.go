@@ -221,12 +221,24 @@ func formatSessionContext(sc *SessionContext) string {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	if len(sc.Events) == 0 {
+	filtered := make([]SessionEvent, 0, len(sc.Events))
+	for _, e := range sc.Events {
+		if !shouldIncludeIntentPromptEvent(e) {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+
+	if len(filtered) == 0 {
 		return "(no prior activity)"
 	}
 
+	if len(filtered) > 12 {
+		filtered = filtered[len(filtered)-12:]
+	}
+
 	var sb strings.Builder
-	for _, e := range sc.Events {
+	for _, e := range filtered {
 		actionStr := ""
 		if e.Action != "" {
 			actionStr = fmt.Sprintf(" => %s", e.Action)
@@ -234,10 +246,27 @@ func formatSessionContext(sc *SessionContext) string {
 		fmt.Fprintf(&sb, "%d. [%s %s] %s %s%s%s\n",
 			e.Sequence, e.Direction, e.Phase, e.Method, e.Authority, e.Path, actionStr)
 		if e.Body != "" {
-			fmt.Fprintf(&sb, "   Body: %s\n", e.Body)
+			body := e.Body
+			if len(body) > 220 {
+				body = body[:220]
+			}
+			fmt.Fprintf(&sb, "   Body: %s\n", body)
 		}
 	}
 	return sb.String()
+}
+
+func shouldIncludeIntentPromptEvent(e SessionEvent) bool {
+	if e.Direction == "inbound" {
+		return true
+	}
+
+	switch e.Authority {
+	case "demo-observer.ibac.svc.cluster.local:7070", "ibac-ollama:11434", "host.docker.internal:11434", "sparc-reflector.ibac.svc.cluster.local:8090":
+		return false
+	}
+
+	return true
 }
 
 func emitIBACEvent(sessionID, stage, status, title, summary, rawLog string, data map[string]any) {
@@ -262,6 +291,7 @@ type LLMRequest struct {
 	Model       string       `json:"model"`
 	Messages    []LLMMessage `json:"messages"`
 	Temperature float64      `json:"temperature"`
+	MaxTokens   int          `json:"max_tokens,omitempty"`
 }
 
 type LLMMessage struct {
@@ -301,10 +331,13 @@ var intentPromptTemplate = loadPromptTemplate()
 
 // formatHTTPAction formats an HTTP request as an action description for the intent prompt
 func formatHTTPAction(method, authority, path, body string) string {
+	if len(body) > 220 {
+		body = body[:220]
+	}
 	return fmt.Sprintf(`Type: Outbound HTTP request
 - Method: %s
 - Destination: %s%s
-- Body (first 500 chars): %.500s`, method, authority, path, body)
+- Body (first 220 chars): %s`, method, authority, path, body)
 }
 
 func lowerContains(haystack, needle string) bool {
@@ -359,10 +392,6 @@ func preflightIntentDecision(sc *SessionContext, method, authority, path, body s
 
 // checkIntent uses an LLM to determine if an outbound action aligns with the original intent
 func checkIntent(sc *SessionContext, method, authority, path, body string) (string, string) {
-	if decision, reason, ok := preflightIntentDecision(sc, method, authority, path, body); ok {
-		return decision, reason
-	}
-
 	action := formatHTTPAction(method, authority, path, body)
 	sessionTrace := formatSessionContext(sc)
 	prompt := fmt.Sprintf(intentPromptTemplate, sc.OriginalIntent, sessionTrace, action)
@@ -373,11 +402,15 @@ func checkIntent(sc *SessionContext, method, authority, path, body string) (stri
 			{Role: "user", Content: prompt},
 		},
 		Temperature: 0.1,
+		MaxTokens:   80,
 	}
 
 	reqBody, err := json.Marshal(llmReq)
 	if err != nil {
 		log.Printf("[IBAC] Failed to marshal LLM request: %v", err)
+		if decision, reason, ok := preflightIntentDecision(sc, method, authority, path, body); ok {
+			return decision, reason
+		}
 		return "BLOCK", "failed to create LLM request"
 	}
 
@@ -386,9 +419,13 @@ func checkIntent(sc *SessionContext, method, authority, path, body string) (stri
 	if ollamaURL == "" {
 		ollamaURL = "http://localhost:11434"
 	}
-	resp, err := http.Post(ollamaURL+"/v1/chat/completions", "application/json", bytes.NewReader(reqBody))
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Post(ollamaURL+"/v1/chat/completions", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		log.Printf("[IBAC] Failed to call LLM: %v", err)
+		if decision, reason, ok := preflightIntentDecision(sc, method, authority, path, body); ok {
+			return decision, reason
+		}
 		return "BLOCK", "LLM unavailable, default deny"
 	}
 	defer resp.Body.Close()
@@ -396,21 +433,33 @@ func checkIntent(sc *SessionContext, method, authority, path, body string) (stri
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("[IBAC] Failed to read LLM response: %v", err)
+		if decision, reason, ok := preflightIntentDecision(sc, method, authority, path, body); ok {
+			return decision, reason
+		}
 		return "BLOCK", "failed to read LLM response"
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("[IBAC] LLM returned %d: %s", resp.StatusCode, string(respBody))
+		if decision, reason, ok := preflightIntentDecision(sc, method, authority, path, body); ok {
+			return decision, reason
+		}
 		return "BLOCK", "LLM error, default deny"
 	}
 
 	var llmResp LLMResponse
 	if err := json.Unmarshal(respBody, &llmResp); err != nil {
 		log.Printf("[IBAC] Failed to unmarshal LLM response: %v", err)
+		if decision, reason, ok := preflightIntentDecision(sc, method, authority, path, body); ok {
+			return decision, reason
+		}
 		return "BLOCK", "failed to parse LLM response"
 	}
 
 	if len(llmResp.Choices) == 0 {
+		if decision, reason, ok := preflightIntentDecision(sc, method, authority, path, body); ok {
+			return decision, reason
+		}
 		return "BLOCK", "empty LLM response"
 	}
 
@@ -428,11 +477,17 @@ func checkIntent(sc *SessionContext, method, authority, path, body string) (stri
 	var decision IntentDecision
 	if err := json.Unmarshal([]byte(content), &decision); err != nil {
 		log.Printf("[IBAC] Failed to parse decision JSON: %v (content: %s)", err, content)
+		if fallbackDecision, fallbackReason, ok := preflightIntentDecision(sc, method, authority, path, body); ok {
+			return fallbackDecision, fallbackReason
+		}
 		return "BLOCK", "unparseable LLM response, default deny"
 	}
 
 	decision.Decision = strings.ToUpper(strings.TrimSpace(decision.Decision))
 	if decision.Decision != "ALLOW" && decision.Decision != "BLOCK" {
+		if fallbackDecision, fallbackReason, ok := preflightIntentDecision(sc, method, authority, path, body); ok {
+			return fallbackDecision, fallbackReason
+		}
 		return "BLOCK", fmt.Sprintf("invalid decision '%s', default deny", decision.Decision)
 	}
 

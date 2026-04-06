@@ -126,7 +126,7 @@ class ReflectorService:
             watsonx_client = get_llm("litellm.watsonx.output_val")
             model_id = os.getenv(
                 "WX_MODEL_ID",
-                "meta-llama/llama-4-maverick-17b-128e-instruct-fp8",
+                "mistral-large-2512"
             )
             config = ComponentConfig(
                 llm_client=watsonx_client(
@@ -142,7 +142,7 @@ class ReflectorService:
                 track=Track.FAST_TRACK,
                 execution_mode=SPARCExecutionMode.ASYNC,
                 include_raw_response=True,
-                retries=parse_int_env("SPARC_RETRIES", 1),
+                retries=parse_int_env("SPARC_RETRIES", 3),
                 max_parallel=parse_int_env("SPARC_MAX_PARALLEL", 2),
             )
 

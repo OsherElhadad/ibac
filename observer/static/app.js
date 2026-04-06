@@ -219,13 +219,32 @@ function renderLogs(events) {
 }
 
 function conversationItems(events) {
-  return events.filter((evt) => {
-    if (evt.stage === "user_turn" || evt.stage === "clarification" || evt.stage === "assistant_reply") return true;
-    if (evt.stage === "model_proposal") return true;
-    if (evt.source === "finance-backend" && evt.status === "success") return true;
-    if (evt.stage === "network_attempt") return true;
-    return false;
-  });
+  const items = [];
+  let lastAssistantReply = null;
+
+  for (const evt of events) {
+    const include =
+      evt.stage === "user_turn" ||
+      evt.stage === "assistant_reply" ||
+      evt.stage === "model_proposal" ||
+      (evt.stage === "sparc_result" && evt.status === "blocked") ||
+      (evt.source === "finance-backend" && evt.status === "success") ||
+      evt.stage === "network_attempt";
+
+    if (!include) continue;
+
+    if (evt.stage === "assistant_reply") {
+      const key = `${evt.summary || evt.raw_log || ""}|${evt.timestamp || ""}`;
+      if (lastAssistantReply === key) {
+        continue;
+      }
+      lastAssistantReply = key;
+    }
+
+    items.push(evt);
+  }
+
+  return items;
 }
 
 function conversationEntry(evt) {
@@ -238,7 +257,7 @@ function conversationEntry(evt) {
     };
   }
 
-  if (evt.stage === "clarification" || evt.stage === "assistant_reply") {
+  if (evt.stage === "assistant_reply") {
     return {
       roleClass: "agent",
       speaker: "Finance Agent",
@@ -255,6 +274,22 @@ function conversationEntry(evt) {
       speaker: "Finance Agent",
       kind: "Tool call",
       text: `${toolName}${args ? ` ${args}` : ""}`,
+    };
+  }
+
+  if (evt.stage === "sparc_result" && evt.status === "blocked") {
+    const toolName = evt.data?.tool_name || "tool";
+    const issue = Array.isArray(evt.data?.issues) ? evt.data.issues[0] : null;
+    const explanation =
+      issue?.explanation ||
+      issue?.metric_name ||
+      evt.summary ||
+      "SPARC blocked the proposed tool call.";
+    return {
+      roleClass: "guard",
+      speaker: "SPARC",
+      kind: "Blocked tool call",
+      text: `${toolName} · ${explanation}`,
     };
   }
 
