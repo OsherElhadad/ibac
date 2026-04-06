@@ -120,8 +120,6 @@ WX_PROJECT_ID=...
 WX_URL=https://us-south.ml.cloud.ibm.com
 ```
 
-Alternative names like `WATSONX_API_KEY`, `WATSONX_PROJECT_ID`, and `WATSONX_URL` are also supported.
-
 ### Start Ollama
 
 ```bash
