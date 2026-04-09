@@ -14,10 +14,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/huang195/ibac/internal/demo"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	v3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"github.com/huang195/ibac/internal/demo"
+	"github.com/huang195/ibac/internal/finance"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -38,9 +39,11 @@ type SessionEvent struct {
 }
 
 type SessionContext struct {
-	OriginalIntent string         `json:"original_intent"`
-	Events         []SessionEvent `json:"events"`
-	mu             sync.Mutex
+	OriginalIntent   string                `json:"original_intent"`
+	Events           []SessionEvent        `json:"events"`
+	Conversation     []finance.ChatMessage `json:"conversation,omitempty"`
+	PendingToolCalls []finance.ToolCall    `json:"pending_tool_calls,omitempty"`
+	mu               sync.Mutex
 }
 
 func (sc *SessionContext) AddEvent(direction, phase, method, authority, path, body string) int {
@@ -87,6 +90,83 @@ func (sc *SessionContext) SetEventAction(idx int, action string) {
 	sc.Events[idx].Action = action
 }
 
+func cloneConversation(messages []finance.ChatMessage) []finance.ChatMessage {
+	cloned := make([]finance.ChatMessage, len(messages))
+	for i, msg := range messages {
+		cloned[i] = msg
+		if msg.ToolCalls != nil {
+			cloned[i].ToolCalls = append([]finance.ToolCall(nil), msg.ToolCalls...)
+		}
+	}
+	return cloned
+}
+
+func (sc *SessionContext) AppendConversation(msg finance.ChatMessage) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.Conversation = append(sc.Conversation, msg)
+}
+
+func (sc *SessionContext) EnsureConversationSeeded() {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if len(sc.Conversation) > 0 {
+		return
+	}
+	sc.Conversation = append(sc.Conversation, finance.ChatMessage{
+		Role:    "system",
+		Content: finance.SystemPrompt,
+	})
+}
+
+func (sc *SessionContext) ConversationSnapshot() []finance.ChatMessage {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return cloneConversation(sc.Conversation)
+}
+
+func normalizedConversationForSPARC(messages []finance.ChatMessage) []finance.ChatMessage {
+	normalized := make([]finance.ChatMessage, 0, len(messages))
+	for i := 0; i < len(messages); i++ {
+		msg := messages[i]
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 && i+1 < len(messages) && messages[i+1].Role == "tool" {
+			var payload struct {
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal([]byte(messages[i+1].Content), &payload); err == nil {
+				status := strings.ToLower(strings.TrimSpace(payload.Status))
+				if status == "needs_clarification" || status == "validation_blocked" {
+					i++
+					continue
+				}
+			}
+		}
+		normalized = append(normalized, msg)
+	}
+	return normalized
+}
+
+func (sc *SessionContext) SetPendingToolCalls(calls []finance.ToolCall) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.PendingToolCalls = append([]finance.ToolCall(nil), calls...)
+}
+
+func (sc *SessionContext) ConsumeMatchingPendingToolCall(actual finance.ToolCall) (finance.ToolCall, bool) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	for i, candidate := range sc.PendingToolCalls {
+		normalizedCandidate := finance.NormalizeToolCall(candidate)
+		if !toolCallsEquivalent(normalizedCandidate, actual) {
+			continue
+		}
+		sc.PendingToolCalls = append(sc.PendingToolCalls[:i], sc.PendingToolCalls[i+1:]...)
+		return normalizedCandidate, true
+	}
+	return finance.ToolCall{}, false
+}
+
 // sessionStore maps sessionID -> *SessionContext
 var sessionStore sync.Map
 
@@ -126,10 +206,38 @@ type streamState struct {
 	authority       string
 	statusCode      int
 	requestEventIdx int // index of request event in SessionContext.Events, -1 if none
+	toolCall        finance.ToolCall
+	hasToolCall     bool
+	syntheticResult string
+	reflectionDone  bool
 }
 
 type processor struct {
 	v3.UnimplementedExternalProcessorServer
+	httpClient   *http.Client
+	sparcBaseURL string
+}
+
+type sparcIssue struct {
+	IssueType   string         `json:"issue_type"`
+	MetricName  string         `json:"metric_name"`
+	Explanation string         `json:"explanation"`
+	Correction  map[string]any `json:"correction,omitempty"`
+}
+
+type sparcRequest struct {
+	Messages  []finance.ChatMessage `json:"messages"`
+	ToolSpecs []finance.Tool        `json:"tool_specs"`
+	ToolCalls []finance.ToolCall    `json:"tool_calls"`
+	SessionID string                `json:"session_id"`
+	Stage     string                `json:"stage"`
+}
+
+type sparcResponse struct {
+	Decision        string       `json:"decision"`
+	ExecutionTimeMS float64      `json:"execution_time_ms"`
+	OverallAvgScore *float64     `json:"overall_avg_score,omitempty"`
+	Issues          []sparcIssue `json:"issues,omitempty"`
 }
 
 // --- Helper functions ---
@@ -282,6 +390,356 @@ func emitIBACEvent(sessionID, stage, status, title, summary, rawLog string, data
 		Summary:   summary,
 		Data:      data,
 		RawLog:    rawLog,
+	})
+}
+
+func emitSPARCEvent(sessionID, stage, status, title, summary, rawLog string, data map[string]any) {
+	if eventEmitter == nil || sessionID == "" {
+		return
+	}
+	eventEmitter.Emit(demo.Event{
+		SessionID: sessionID,
+		Source:    "sparc",
+		Stage:     stage,
+		Status:    status,
+		Title:     title,
+		Summary:   summary,
+		Data:      data,
+		RawLog:    rawLog,
+	})
+}
+
+func sparcReflectorURL() string {
+	baseURL := strings.TrimSpace(os.Getenv("SPARC_REFLECTOR_URL"))
+	if baseURL == "" {
+		baseURL = "http://sparc-reflector.ibac.svc.cluster.local:8090"
+	}
+	return strings.TrimRight(baseURL, "/")
+}
+
+func immediateJSONResponse(statusCode typev3.StatusCode, body string, details string) *v3.ProcessingResponse {
+	return &v3.ProcessingResponse{
+		Response: &v3.ProcessingResponse_ImmediateResponse{
+			ImmediateResponse: &v3.ImmediateResponse{
+				Status: &typev3.HttpStatus{Code: statusCode},
+				Headers: &v3.HeaderMutation{
+					SetHeaders: []*core.HeaderValueOption{
+						{Header: &core.HeaderValue{Key: "content-type", RawValue: []byte("application/json")}},
+					},
+				},
+				Body:    []byte(body),
+				Details: details,
+			},
+		},
+	}
+}
+
+func isFinanceBackendDestination(authority string) bool {
+	return authority == "finance-backend.ibac.svc.cluster.local:8181"
+}
+
+func isOllamaDestination(authority string) bool {
+	return authority == "ibac-ollama:11434" || authority == "host.docker.internal:11434"
+}
+
+func isReflectableFinanceRequest(authority, method, path string) bool {
+	if !isFinanceBackendDestination(authority) {
+		return false
+	}
+	switch {
+	case method == http.MethodGet && strings.HasPrefix(path, "/transactions/"):
+		return true
+	case method == http.MethodGet && strings.HasPrefix(path, "/customers/"):
+		return true
+	case method == http.MethodPost && path == "/refunds":
+		return true
+	case method == http.MethodGet && strings.HasPrefix(path, "/invoices/"):
+		return true
+	default:
+		return false
+	}
+}
+
+func buildObservedFinanceToolCall(method, path, body string) (finance.ToolCall, bool) {
+	switch {
+	case method == http.MethodGet && strings.HasPrefix(path, "/transactions/"):
+		args, _ := json.Marshal(map[string]any{"transaction_id": strings.TrimPrefix(path, "/transactions/")})
+		return finance.ToolCall{
+			ID:   fmt.Sprintf("observed_%d", time.Now().UnixNano()),
+			Type: "function",
+			Function: finance.FunctionCall{
+				Name:      "get_transaction",
+				Arguments: string(args),
+			},
+		}, true
+	case method == http.MethodGet && strings.HasPrefix(path, "/customers/"):
+		args, _ := json.Marshal(map[string]any{"customer_id": strings.TrimPrefix(path, "/customers/")})
+		return finance.ToolCall{
+			ID:   fmt.Sprintf("observed_%d", time.Now().UnixNano()),
+			Type: "function",
+			Function: finance.FunctionCall{
+				Name:      "lookup_customer",
+				Arguments: string(args),
+			},
+		}, true
+	case method == http.MethodGet && strings.HasPrefix(path, "/invoices/"):
+		args, _ := json.Marshal(map[string]any{"invoice_id": strings.TrimPrefix(path, "/invoices/")})
+		return finance.ToolCall{
+			ID:   fmt.Sprintf("observed_%d", time.Now().UnixNano()),
+			Type: "function",
+			Function: finance.FunctionCall{
+				Name:      "get_invoice",
+				Arguments: string(args),
+			},
+		}, true
+	case method == http.MethodPost && path == "/refunds":
+		args := finance.ParseArgs(body)
+		argsJSON, _ := json.Marshal(args)
+		return finance.ToolCall{
+			ID:   fmt.Sprintf("observed_%d", time.Now().UnixNano()),
+			Type: "function",
+			Function: finance.FunctionCall{
+				Name:      "issue_refund",
+				Arguments: string(argsJSON),
+			},
+		}, true
+	default:
+		return finance.ToolCall{}, false
+	}
+}
+
+func toolCallsEquivalent(a, b finance.ToolCall) bool {
+	if a.Function.Name != b.Function.Name {
+		return false
+	}
+	argsA := finance.ParseArgs(a.Function.Arguments)
+	argsB := finance.ParseArgs(b.Function.Arguments)
+	switch a.Function.Name {
+	case "get_transaction", "issue_refund":
+		return fmt.Sprint(argsA["transaction_id"]) == fmt.Sprint(argsB["transaction_id"])
+	case "lookup_customer":
+		return fmt.Sprint(argsA["customer_id"]) == fmt.Sprint(argsB["customer_id"])
+	case "get_invoice":
+		return fmt.Sprint(argsA["invoice_id"]) == fmt.Sprint(argsB["invoice_id"])
+	default:
+		return a.Function.Arguments == b.Function.Arguments
+	}
+}
+
+func syntheticClarificationResult(toolCall finance.ToolCall, issues []sparcIssue) string {
+	message := "I need one more detail before I can continue."
+	missingField := ""
+
+	switch toolCall.Function.Name {
+	case "get_transaction":
+		message = "Could you share the exact full transaction ID before I continue with the refund?"
+		missingField = "transaction_id"
+	case "issue_refund":
+		message = "Could you confirm the refund reason before I continue?"
+		missingField = "refund_reason"
+	}
+
+	for _, issue := range issues {
+		lower := strings.ToLower(issue.Explanation + " " + issue.MetricName)
+		if strings.Contains(lower, "transaction") && strings.Contains(lower, "id") {
+			message = "Could you share the exact full transaction ID before I continue with the refund?"
+			missingField = "transaction_id"
+			break
+		}
+		if strings.Contains(lower, "refund_reason") || strings.Contains(lower, "refund reason") {
+			message = "Could you confirm the refund reason before I continue?"
+			missingField = "refund_reason"
+			break
+		}
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"status":        "needs_clarification",
+		"message":       message,
+		"missing_field": missingField,
+		"tool":          toolCall.Function.Name,
+	})
+	return string(payload)
+}
+
+func parseObservedToolCalls(body string) []finance.ToolCall {
+	var response finance.ChatResponse
+	if err := json.Unmarshal([]byte(body), &response); err != nil || len(response.Choices) == 0 {
+		return nil
+	}
+
+	msg := response.Choices[0].Message
+	if len(msg.ToolCalls) > 0 {
+		calls := make([]finance.ToolCall, 0, len(msg.ToolCalls))
+		for _, tc := range msg.ToolCalls {
+			calls = append(calls, finance.NormalizeToolCall(tc))
+		}
+		return calls
+	}
+	if parsed := finance.ParseTextToolCall(msg.Content); parsed != nil {
+		calls := make([]finance.ToolCall, 0, len(parsed))
+		for _, tc := range parsed {
+			calls = append(calls, finance.NormalizeToolCall(tc))
+		}
+		return calls
+	}
+	return nil
+}
+
+func (p *processor) reflectFinanceToolCall(sessionID string, conversation []finance.ChatMessage, toolCall finance.ToolCall) (*sparcResponse, error) {
+	payload := sparcRequest{
+		Messages:  conversation,
+		ToolSpecs: finance.Tools(),
+		ToolCalls: []finance.ToolCall{toolCall},
+		SessionID: sessionID,
+		Stage:     "pre_tool",
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	reflectURL := p.sparcBaseURL + "/reflect"
+	req, err := http.NewRequest(http.MethodPost, reflectURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if sessionID != "" {
+		req.Header.Set("X-Session-Id", sessionID)
+	}
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("sparc-reflector returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var parsed sparcResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, err
+	}
+	return &parsed, nil
+}
+
+func (p *processor) evaluateFinanceRequest(sessionID string, sc *SessionContext, actual finance.ToolCall) (*sparcResponse, finance.ToolCall, string, error) {
+	sc.EnsureConversationSeeded()
+	pending, ok := sc.ConsumeMatchingPendingToolCall(actual)
+	if !ok {
+		return nil, finance.ToolCall{}, "", fmt.Errorf("no matching pending tool call for %s", actual.Function.Name)
+	}
+
+	emitSPARCEvent(sessionID, "sparc_observed_proposal", "started", "Observed model tool proposal", fmt.Sprintf("Sidecar observed %s from the model output.", pending.Function.Name), pending.Function.Arguments, map[string]any{
+		"tool_name": pending.Function.Name,
+		"arguments": finance.ParseArgs(pending.Function.Arguments),
+	})
+
+	conversation := normalizedConversationForSPARC(sc.ConversationSnapshot())
+	emitSPARCEvent(sessionID, "sparc_reflection", "started", "Started SPARC reflection", fmt.Sprintf("Sidecar is evaluating %s before the backend request is allowed.", pending.Function.Name), fmt.Sprintf("POST %s/reflect", p.sparcBaseURL), map[string]any{
+		"tool_name": pending.Function.Name,
+	})
+
+	resp, err := p.reflectFinanceToolCall(sessionID, conversation, pending)
+	if err != nil {
+		return nil, finance.ToolCall{}, "", err
+	}
+
+	status := "success"
+	title := "SPARC approved tool call"
+	summary := fmt.Sprintf("SPARC approved %s for execution.", pending.Function.Name)
+	if strings.EqualFold(resp.Decision, "reject") {
+		status = "blocked"
+		title = "SPARC blocked tool call"
+		summary = fmt.Sprintf("SPARC blocked %s because the call was not well grounded.", pending.Function.Name)
+	} else if strings.EqualFold(resp.Decision, "error") {
+		status = "error"
+		title = "SPARC returned an error"
+		summary = fmt.Sprintf("SPARC reported an error while evaluating %s.", pending.Function.Name)
+	}
+
+	data := map[string]any{
+		"tool_name":         pending.Function.Name,
+		"decision":          resp.Decision,
+		"execution_time_ms": resp.ExecutionTimeMS,
+		"issues":            resp.Issues,
+	}
+	if resp.OverallAvgScore != nil {
+		data["overall_avg_score"] = *resp.OverallAvgScore
+	}
+	emitSPARCEvent(sessionID, "sparc_result", status, title, summary, fmt.Sprintf("SPARC decision=%s", resp.Decision), data)
+
+	if strings.EqualFold(resp.Decision, "reject") || strings.EqualFold(resp.Decision, "error") {
+		synthetic := syntheticClarificationResult(pending, resp.Issues)
+		sc.AppendConversation(finance.ChatMessage{Role: "assistant", ToolCalls: []finance.ToolCall{pending}})
+		sc.AppendConversation(finance.ChatMessage{Role: "tool", ToolCallID: pending.ID, Content: synthetic})
+		emitSPARCEvent(sessionID, "sparc_synthetic_tool_result", "blocked", "Returned clarification tool result", "Sidecar returned a synthetic tool result so the agent can ask for the missing detail.", synthetic, map[string]any{
+			"tool_name": pending.Function.Name,
+		})
+		return resp, pending, synthetic, nil
+	}
+
+	sc.AppendConversation(finance.ChatMessage{Role: "assistant", ToolCalls: []finance.ToolCall{pending}})
+	return resp, pending, "", nil
+}
+
+func captureInboundIntent(sessionID, body string, requestEventIdx int) {
+	var reqBody map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &reqBody); err != nil {
+		return
+	}
+	query, ok := reqBody["query"].(string)
+	if !ok || sessionID == "" {
+		return
+	}
+
+	sc := getOrCreateSession(sessionID)
+	sc.mu.Lock()
+	sc.OriginalIntent = query
+	sc.mu.Unlock()
+	sc.EnsureConversationSeeded()
+	sc.AppendConversation(finance.ChatMessage{Role: "user", Content: query})
+	activeSessionID.Store(sessionID)
+	log.Printf("[IBAC] Captured intent for session %s: %s", sessionID, query)
+	sc.SetEventAction(requestEventIdx, "captured intent")
+	emitIBACEvent(sessionID, "intent_capture", "info", "Captured user intent", query, fmt.Sprintf("intent=%s", query), map[string]any{
+		"query": query,
+	})
+}
+
+func captureObservedOllamaResponse(sessionID, body string) {
+	if sessionID == "" {
+		return
+	}
+	sc := getOrCreateSession(sessionID)
+	toolCalls := parseObservedToolCalls(body)
+	sc.SetPendingToolCalls(toolCalls)
+}
+
+func captureInboundAssistantReply(sessionID, body string) {
+	if sessionID == "" {
+		return
+	}
+
+	var respBody map[string]any
+	if err := json.Unmarshal([]byte(body), &respBody); err != nil {
+		return
+	}
+	reply, _ := respBody["response"].(string)
+	reply = strings.TrimSpace(reply)
+	if reply == "" {
+		return
+	}
+	getOrCreateSession(sessionID).AppendConversation(finance.ChatMessage{
+		Role:    "assistant",
+		Content: reply,
 	})
 }
 
@@ -538,12 +996,50 @@ func (p *processor) Process(stream v3.ExternalProcessor_ProcessServer) error {
 				sc := getOrCreateSession(sessionID)
 				state.requestEventIdx = sc.AddEvent(state.direction, "request", state.method, state.authority, state.path, "")
 				// Set a default action; RequestBody will overwrite with the actual decision
-				if state.direction == "outbound" && isTrustedDestination(state.authority) {
+				if state.direction == "outbound" && isTrustedDestination(state.authority) && !isReflectableFinanceRequest(state.authority, state.method, state.path) {
 					sc.SetEventAction(state.requestEventIdx, "ALLOW (trusted)")
 				}
 			}
 
 			resp = allowHeaders()
+
+			if state.direction == "outbound" && isReflectableFinanceRequest(state.authority, state.method, state.path) && state.method == http.MethodGet {
+				if sessionID == "" {
+					resp = blockRequest("missing session ID")
+					break
+				}
+
+				actual, ok := buildObservedFinanceToolCall(state.method, state.path, "")
+				if !ok {
+					resp = blockRequest("failed to map finance backend request")
+					break
+				}
+
+				sc := getOrCreateSession(sessionID)
+				sparcResp, pending, synthetic, err := p.evaluateFinanceRequest(sessionID, sc, actual)
+				state.reflectionDone = true
+				if err != nil {
+					synthetic = syntheticClarificationResult(actual, nil)
+					sc.SetEventAction(state.requestEventIdx, "BLOCK (SPARC fail-closed)")
+					emitSPARCEvent(sessionID, "sparc_result", "error", "SPARC validation failed closed", fmt.Sprintf("Sidecar could not validate %s, so it returned a clarification-needed tool result instead of allowing the backend call.", actual.Function.Name), err.Error(), map[string]any{
+						"tool_name": actual.Function.Name,
+					})
+					state.syntheticResult = synthetic
+					resp = immediateJSONResponse(typev3.StatusCode_OK, synthetic, "sparc_validation_block")
+					break
+				}
+
+				state.toolCall = pending
+				state.hasToolCall = true
+				if synthetic != "" || strings.EqualFold(sparcResp.Decision, "reject") || strings.EqualFold(sparcResp.Decision, "error") {
+					sc.SetEventAction(state.requestEventIdx, "BLOCK (SPARC)")
+					state.syntheticResult = synthetic
+					resp = immediateJSONResponse(typev3.StatusCode_OK, synthetic, "sparc_validation_block")
+					break
+				}
+
+				sc.SetEventAction(state.requestEventIdx, "ALLOW (SPARC approved)")
+			}
 
 		case *v3.ProcessingRequest_RequestBody:
 			body := string(r.RequestBody.Body)
@@ -556,25 +1052,54 @@ func (p *processor) Process(stream v3.ExternalProcessor_ProcessServer) error {
 			}
 
 			if state.direction == "inbound" {
-				// Inbound: capture the user's intent from the request body
-				var reqBody map[string]interface{}
-				if err := json.Unmarshal([]byte(body), &reqBody); err == nil {
-					if query, ok := reqBody["query"].(string); ok && sessionID != "" {
-						sc := getOrCreateSession(sessionID)
-						sc.mu.Lock()
-						sc.OriginalIntent = query
-						sc.mu.Unlock()
-						activeSessionID.Store(sessionID)
-						log.Printf("[IBAC] Captured intent for session %s: %s", sessionID, query)
-						sc.SetEventAction(state.requestEventIdx, "captured intent")
-						emitIBACEvent(sessionID, "intent_capture", "info", "Captured user intent", query, fmt.Sprintf("intent=%s", query), map[string]any{
-							"query": query,
-						})
-					}
-				}
+				captureInboundIntent(sessionID, body, state.requestEventIdx)
 				resp = allowBody()
 
 			} else if state.direction == "outbound" {
+				if isReflectableFinanceRequest(state.authority, state.method, state.path) {
+					if state.reflectionDone {
+						resp = allowBody()
+						break
+					}
+					if sessionID == "" {
+						resp = blockRequest("missing session ID")
+						break
+					}
+
+					actual, ok := buildObservedFinanceToolCall(state.method, state.path, body)
+					if !ok {
+						resp = blockRequest("failed to map finance backend request")
+						break
+					}
+
+					sc := getOrCreateSession(sessionID)
+					sparcResp, pending, synthetic, err := p.evaluateFinanceRequest(sessionID, sc, actual)
+					state.reflectionDone = true
+					if err != nil {
+						synthetic = syntheticClarificationResult(actual, nil)
+						sc.SetEventAction(state.requestEventIdx, "BLOCK (SPARC fail-closed)")
+						emitSPARCEvent(sessionID, "sparc_result", "error", "SPARC validation failed closed", fmt.Sprintf("Sidecar could not validate %s, so it returned a clarification-needed tool result instead of allowing the backend call.", actual.Function.Name), err.Error(), map[string]any{
+							"tool_name": actual.Function.Name,
+						})
+						state.syntheticResult = synthetic
+						resp = immediateJSONResponse(typev3.StatusCode_OK, synthetic, "sparc_validation_block")
+						break
+					}
+
+					state.toolCall = pending
+					state.hasToolCall = true
+					if synthetic != "" || strings.EqualFold(sparcResp.Decision, "reject") || strings.EqualFold(sparcResp.Decision, "error") {
+						sc.SetEventAction(state.requestEventIdx, "BLOCK (SPARC)")
+						state.syntheticResult = synthetic
+						resp = immediateJSONResponse(typev3.StatusCode_OK, synthetic, "sparc_validation_block")
+						break
+					}
+
+					sc.SetEventAction(state.requestEventIdx, "ALLOW (SPARC approved)")
+					resp = allowBody()
+					break
+				}
+
 				// Check if destination is trusted
 				if isTrustedDestination(state.authority) {
 					log.Printf("[IBAC] Trusted destination %s, logging only", state.authority)
@@ -646,6 +1171,10 @@ func (p *processor) Process(stream v3.ExternalProcessor_ProcessServer) error {
 			}
 
 		case *v3.ProcessingRequest_ResponseHeaders:
+			statusText := getHeaderValue(r.ResponseHeaders.Headers.Headers, ":status")
+			if statusText != "" {
+				fmt.Sscanf(statusText, "%d", &state.statusCode)
+			}
 			resp = allowResponseHeaders()
 
 		case *v3.ProcessingRequest_ResponseBody:
@@ -663,6 +1192,22 @@ func (p *processor) Process(stream v3.ExternalProcessor_ProcessServer) error {
 				sc.SetEventAction(idx, action)
 				log.Printf("[IBAC] Logged %s response for session %s: %s%s (%d bytes)",
 					state.direction, sessionID, state.authority, state.path, len(body))
+			}
+
+			if state.direction == "outbound" && isOllamaDestination(state.authority) && strings.HasSuffix(state.path, "/v1/chat/completions") {
+				captureObservedOllamaResponse(sessionID, body)
+			}
+
+			if state.direction == "outbound" && state.hasToolCall && isReflectableFinanceRequest(state.authority, state.method, state.path) && state.syntheticResult == "" && sessionID != "" {
+				getOrCreateSession(sessionID).AppendConversation(finance.ChatMessage{
+					Role:       "tool",
+					Content:    body,
+					ToolCallID: state.toolCall.ID,
+				})
+			}
+
+			if state.direction == "inbound" {
+				captureInboundAssistantReply(sessionID, body)
 			}
 
 			// Clear activeSessionID when inbound response completes
@@ -689,13 +1234,18 @@ func main() {
 
 	initTrustedDestinations()
 
+	httpClient := &http.Client{Timeout: 300 * time.Second}
+
 	lis, err := net.Listen("tcp", ":9090")
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
 
 	grpcServer := grpc.NewServer()
-	v3.RegisterExternalProcessorServer(grpcServer, &processor{})
+	v3.RegisterExternalProcessorServer(grpcServer, &processor{
+		httpClient:   httpClient,
+		sparcBaseURL: sparcReflectorURL(),
+	})
 
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)

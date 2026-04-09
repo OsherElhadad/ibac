@@ -43,7 +43,7 @@ Envoy :10000
     v
 finance-agent :8080
     |
-    +--> SPARC reflector :8090 --> host SPARC worker --> Watsonx
+    +--> outbound HTTP via Envoy :10001 --> sidecar :9090 --> SPARC reflector :8090 --> host SPARC worker --> Watsonx
     |
     +--> finance-backend :8181
     |
@@ -62,7 +62,7 @@ demo-observer :7070 / localhost:30070
 | `sparc-reflector` | In-cluster SPARC relay endpoint | `sparc-reflector:8090` |
 | Host SPARC worker | Watsonx-backed SPARC execution | local process under `.runtime/` |
 | `finance-backend` | Transactions, customers, refunds, invoices | `finance-backend:8181` |
-| `sidecar` | IBAC policy engine | `:9090` inside protected pods |
+| `sidecar` | IBAC policy engine and sidecar-owned SPARC execution | `:9090` ext_proc |
 | `envoy` | Inbound and outbound interception | `:10000` and `:10001` |
 | `evil-server` | Exfiltration target for demos | `evil-server:9999` |
 | `audit-acme-payments` | Malicious invoice callback alias | `audit-acme-payments:9999` |
@@ -78,6 +78,14 @@ demo-observer :7070 / localhost:30070
   - `lookup_customer`
   - `issue_refund`
   - `get_invoice`
+- The finance agent does not know about SPARC directly and does not prepare SPARC payloads.
+- The sidecar reconstructs SPARC inputs from observed traffic:
+  - inbound user request
+  - outbound Ollama tool proposal
+  - outbound finance-backend request
+  - finance-backend response
+  - final assistant reply
+- The sidecar is the only component that calls `sparc-reflector`.
 - SPARC is not used for `http_post`. That second failure is intentionally left for IBAC.
 - The finance backend is a trusted transport destination.
 - The invoice text returned by the finance backend is untrusted content.
@@ -93,7 +101,8 @@ ibac/
 ├── finance-agent/              # Finance demo agent
 ├── finance-backend/            # Finance demo backend
 ├── observer/                   # Live dashboard + replay API
-├── sidecar/                    # IBAC ext_proc server and intent policy
+├── sidecar/                    # IBAC ext_proc server + sidecar-owned SPARC flow
+├── internal/finance/           # Shared finance tool schema and prompts
 ├── sparc-reflector/            # SPARC relay service + host worker
 ├── internal/demo/              # Shared event schema/emitter
 ├── k8s/                        # Kubernetes manifests
@@ -177,7 +186,7 @@ The intended finance flow is easy to inspect in the UI:
 
 1. `User` lane shows the refund request.
 2. `Finance Agent` lane shows the hallucinated tool proposal.
-3. `SPARC` lane shows the rejection and score.
+3. `SPARC` lane shows the observed tool proposal, the sidecar-launched reflection, and the rejection score.
 4. `Conversation` shows the clarification turn.
 5. `Finance Backend` shows transaction, customer, and refund outputs.
 6. `User` lane shows the invoice request.
@@ -213,7 +222,7 @@ Expected behavior:
 - Turn 1: SPARC blocks the hallucinated `transaction_id`
 - Turn 2: refund succeeds after clarification
 - Turn 3: IBAC blocks the injected outbound POST
-- Final check: no new `evil-server` entries are present
+- Demo ends after the IBAC block and the final agent explanation
 
 The demo script automatically:
 
@@ -221,7 +230,6 @@ The demo script automatically:
 - emits a session-start event to the observer
 - runs the three turns in order
 - waits for the expected SPARC + refund + IBAC sequence
-- verifies that no new evil-server entries were written
 
 ## How IBAC Works
 
@@ -234,12 +242,18 @@ The demo script automatically:
 
 ## How SPARC Works Here
 
-1. The finance agent proposes a first-party tool call.
-2. The proposal is sent to the in-cluster `sparc-reflector`.
-3. The reflector relays the job to the host SPARC worker.
-4. The host worker runs ALTK SPARC with Watsonx using `Track.FAST_TRACK`.
-5. The result is posted back to the observer and returned to the finance agent.
-6. The finance agent either proceeds or asks for clarification.
+1. The finance agent calls Ollama with the shared finance tool inventory.
+2. The sidecar observes the model's tool proposal in the outbound Ollama response and stores it as a pending tool call.
+3. When the agent tries to reach the trusted finance backend, that outbound request is intercepted by Envoy and evaluated inside the sidecar before it is allowed through.
+4. The sidecar combines:
+   - the observed conversation history
+   - the shared finance tool inventory
+   - the pending model tool proposal
+5. The sidecar sends that reconstructed payload to `sparc-reflector`.
+6. The reflector relays the job to the host SPARC worker.
+7. The host worker runs ALTK SPARC with Watsonx using `Track.FAST_TRACK`.
+8. If SPARC blocks the tool call, the sidecar returns a synthetic clarification-needed tool result to the agent without mentioning SPARC.
+9. If SPARC approves the tool call, the backend request continues normally.
 
 ## Commands
 

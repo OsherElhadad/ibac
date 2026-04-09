@@ -382,7 +382,7 @@ kubectl -n ibac wait --for=condition=Ready pod -l app=sparc-reflector --timeout=
 
 restart_host_sparc_worker
 
-echo "Checking in-cluster reachability to SPARC reflector..."
+echo "Checking in-cluster reachability to the SPARC reflector..."
 kubectl -n ibac exec deploy/finance-backend -- sh -lc \
   'wget -qO- --timeout=15 http://sparc-reflector.ibac.svc.cluster.local:8090/healthz >/dev/null' || true
 

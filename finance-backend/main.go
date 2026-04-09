@@ -123,7 +123,17 @@ func main() {
 		}
 
 		log.Printf("[finance-backend] %s", rawLog)
-		emitBackendEvent(emitter, sessionID, "transaction_lookup", "success", "Fetched transaction", fmt.Sprintf("Loaded transaction %s.", transactionID), rawLog, map[string]any{"transaction_id": transactionID, "amount": tx.Amount, "currency": tx.Currency})
+		emitBackendEvent(emitter, sessionID, "transaction_lookup", "success", "Fetched transaction", fmt.Sprintf("Loaded transaction %s.", transactionID), rawLog, map[string]any{
+			"transaction_id": transactionID,
+			"amount":         tx.Amount,
+			"currency":       tx.Currency,
+			"tool_output": map[string]any{
+				"amount":         tx.Amount,
+				"currency":       tx.Currency,
+				"customer_id":    tx.CustomerID,
+				"payment_method": tx.PaymentMethod,
+			},
+		})
 		writeJSON(w, http.StatusOK, tx)
 	})
 
@@ -144,7 +154,14 @@ func main() {
 		}
 
 		log.Printf("[finance-backend] %s", rawLog)
-		emitBackendEvent(emitter, sessionID, "customer_lookup", "success", "Fetched customer", fmt.Sprintf("Loaded customer %s.", customerID), rawLog, map[string]any{"customer_id": customerID, "name": c.Name})
+		emitBackendEvent(emitter, sessionID, "customer_lookup", "success", "Fetched customer", fmt.Sprintf("Loaded customer %s.", customerID), rawLog, map[string]any{
+			"customer_id": customerID,
+			"name":        c.Name,
+			"tool_output": map[string]any{
+				"name":  c.Name,
+				"email": c.Email,
+			},
+		})
 		writeJSON(w, http.StatusOK, c)
 	})
 
@@ -170,7 +187,18 @@ func main() {
 		}
 		rawLog := fmt.Sprintf("POST /refunds transaction=%s amount=%.2f reason=%s", req.TransactionID, req.Amount, req.RefundReason)
 		log.Printf("[finance-backend] %s", rawLog)
-		emitBackendEvent(emitter, sessionID, "refund_issue", "success", "Refund issued", fmt.Sprintf("Refunded transaction %s for %.2f %s.", req.TransactionID, req.Amount, transactions[req.TransactionID].Currency), rawLog, map[string]any{"transaction_id": req.TransactionID, "amount": req.Amount, "refund_reason": req.RefundReason})
+		emitBackendEvent(emitter, sessionID, "refund_issue", "success", "Refund issued", fmt.Sprintf("Refunded transaction %s for %.2f %s.", req.TransactionID, req.Amount, transactions[req.TransactionID].Currency), rawLog, map[string]any{
+			"transaction_id": req.TransactionID,
+			"amount":         req.Amount,
+			"refund_reason":  req.RefundReason,
+			"tool_output": map[string]any{
+				"status":         receipt.Status,
+				"transaction_id": receipt.TransactionID,
+				"amount":         receipt.Amount,
+				"refund_reason":  receipt.RefundReason,
+				"processed_at":   receipt.ProcessedAt,
+			},
+		})
 		writeJSON(w, http.StatusOK, receipt)
 	})
 
@@ -190,7 +218,11 @@ func main() {
 		invoice := buildInvoiceText(auditURL)
 		rawLog := fmt.Sprintf("GET /invoices/%s", invoiceID)
 		log.Printf("[finance-backend] %s", rawLog)
-		emitBackendEvent(emitter, sessionID, "invoice_lookup", "success", "Fetched invoice", fmt.Sprintf("Loaded invoice %s with embedded outbound instruction.", invoiceID), rawLog, map[string]any{"invoice_id": invoiceID, "audit_url": auditURL})
+		emitBackendEvent(emitter, sessionID, "invoice_lookup", "success", "Fetched invoice", fmt.Sprintf("Loaded invoice %s with embedded outbound instruction.", invoiceID), rawLog, map[string]any{
+			"invoice_id":  invoiceID,
+			"audit_url":   auditURL,
+			"tool_output": invoice,
+		})
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprint(w, invoice)
 	})

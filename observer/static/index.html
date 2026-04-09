@@ -55,7 +55,7 @@
             </article>
             <article class="service-card">
               <h3>SPARC Reflector</h3>
-              <p>Cluster service, host relay worker, Watsonx-backed.</p>
+              <p>Standalone cluster reflector, host relay worker, Watsonx-backed.</p>
               <code>sparc-reflector:8090</code>
             </article>
             <article class="service-card">
@@ -65,7 +65,7 @@
             </article>
             <article class="service-card">
               <h3>IBAC Sidecar</h3>
-              <p>Intent capture and outbound policy enforcement.</p>
+              <p>Intent capture, outbound policy checks, and pre-tool SPARC execution.</p>
               <code>sidecar:9090</code>
             </article>
             <article class="service-card">
@@ -117,8 +117,8 @@
             </article>
             <article class="topology-card">
               <h3>Pre-Tool Guard</h3>
-              <p>SPARC runs before first-party finance tools only.</p>
-              <code>finance-agent -> sparc-reflector:8090 -> host worker -> Watsonx</code>
+              <p>SPARC runs before first-party finance tools inside the sidecar ext_proc path.</p>
+              <code>finance-agent -> Envoy :10001 -> sidecar :9090 -> sparc-reflector:8090 -> host worker -> Watsonx</code>
             </article>
             <article class="topology-card">
               <h3>Business Tools</h3>

@@ -294,29 +294,12 @@ function conversationEntry(evt) {
   }
 
   if (evt.source === "finance-backend") {
-    const pieces = [];
-    if (evt.stage === "transaction_lookup") {
-      pieces.push(`transaction ${evt.data?.transaction_id || ""}`.trim());
-      if (evt.data?.amount !== undefined && evt.data?.currency) {
-        pieces.push(`${evt.data.amount} ${evt.data.currency}`);
-      }
-    } else if (evt.stage === "customer_lookup") {
-      pieces.push(`customer ${evt.data?.customer_id || ""}`.trim());
-      if (evt.data?.name) {
-        pieces.push(evt.data.name);
-      }
-    } else if (evt.stage === "refund_issue") {
-      pieces.push(`refund ${evt.data?.transaction_id || ""}`.trim());
-      if (evt.data?.amount !== undefined) {
-        pieces.push(`amount ${evt.data.amount}`);
-      }
-      if (evt.data?.refund_reason) {
-        pieces.push(`reason ${evt.data.refund_reason}`);
-      }
-    } else if (evt.stage === "invoice_lookup") {
-      pieces.push(`invoice ${evt.data?.invoice_id || ""}`.trim());
-      if (evt.data?.audit_url) {
-        pieces.push(`embedded URL ${shortenMiddle(evt.data.audit_url, 52)}`);
+    let fullOutput = evt.data?.tool_output;
+    if (fullOutput !== undefined) {
+      if (typeof fullOutput === "string") {
+        fullOutput = fullOutput.trim();
+      } else {
+        fullOutput = JSON.stringify(fullOutput, null, 2);
       }
     }
 
@@ -324,7 +307,7 @@ function conversationEntry(evt) {
       roleClass: "tool",
       speaker: "Finance Backend",
       kind: "Tool output",
-      text: pieces.filter(Boolean).join(" · ") || evt.summary || "",
+      text: fullOutput || evt.summary || evt.raw_log || "",
     };
   }
 
@@ -335,7 +318,7 @@ function conversationEntry(evt) {
       roleClass: evt.status === "blocked" ? "guard" : "tool",
       speaker: evt.status === "blocked" ? "IBAC" : "Finance Agent",
       kind: evt.status === "blocked" ? "Blocked tool output" : "Tool call",
-      text: url ? `${toolName} ${shortenMiddle(url, 52)}` : evt.summary || "",
+      text: evt.status === "blocked" ? (evt.raw_log || evt.summary || "") : (url ? `${toolName} ${shortenMiddle(url, 52)}` : evt.summary || ""),
     };
   }
 

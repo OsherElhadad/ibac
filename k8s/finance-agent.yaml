@@ -85,8 +85,6 @@ spec:
         env:
         - name: FINANCE_BACKEND_URL
           value: "http://finance-backend.ibac.svc.cluster.local:8181"
-        - name: SPARC_URL
-          value: "http://sparc-reflector.ibac.svc.cluster.local:8090"
         - name: OBSERVER_URL
           value: "http://demo-observer.ibac.svc.cluster.local:7070"
         - name: OLLAMA_URL
@@ -112,8 +110,10 @@ spec:
           value: "http://ibac-ollama:11434"
         - name: OBSERVER_URL
           value: "http://demo-observer.ibac.svc.cluster.local:7070"
+        - name: SPARC_REFLECTOR_URL
+          value: "http://sparc-reflector.ibac.svc.cluster.local:8090"
         - name: TRUSTED_DESTINATIONS
-          value: "ibac-ollama:11434,host.docker.internal:11434,finance-backend.ibac.svc.cluster.local:8181,sparc-reflector.ibac.svc.cluster.local:8090,demo-observer.ibac.svc.cluster.local:7070"
+          value: "ibac-ollama:11434,host.docker.internal:11434,finance-backend.ibac.svc.cluster.local:8181,demo-observer.ibac.svc.cluster.local:7070"
         securityContext:
           runAsUser: 1001
       volumes:
