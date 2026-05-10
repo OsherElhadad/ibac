@@ -1,0 +1,56 @@
+# Build context: the workspace root (two levels above ibac/ce-demo/), so
+# this Dockerfile can see both ibac/ce-demo/ce-proxy/ and CE-Manager/
+# (sibling of ibac/).
+# Usage:
+#   podman build -t localhost/ibac-ce-proxy:latest \
+#       -f ibac/ce-demo/dockerfiles/Dockerfile.ce-proxy $WORKSPACE_ROOT
+#
+# No SSH access is required to build this image. CE-Manager is vendored via
+# COPY, and the IBM-internal `llm-client` dependency is stubbed via the
+# committed tree at ibac/ce-demo/ce-proxy/stubs/llm_client/.
+FROM python:3.12-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Prefer IPv4 for hostname resolution. The kind cluster's pod network returns
+# AAAA records for public hostnames but has no IPv6 routes to the internet —
+# so glibc's default RFC 6724 behaviour picks the v6 address, the TCP connect
+# hangs for ~75-130 s, and only then falls back to IPv4. This is the root
+# cause of the "sometimes 2s, sometimes 272s" watsonx latency jitter. glibc's
+# /etc/gai.conf is the documented, kernel-supported mechanism to flip the
+# preference — precedence 100 on the IPv4-mapped range makes getaddrinfo()
+# put all IPv4 results ahead of IPv6 results.
+RUN printf '%s\n' \
+    'precedence ::1/128       50' \
+    'precedence ::/0           40' \
+    'precedence 2002::/16      30' \
+    'precedence ::/96          20' \
+    'precedence ::ffff:0:0/96 100' \
+    > /etc/gai.conf
+
+WORKDIR /app
+
+# Install the proxy's own Python deps first for layer caching. No SSH needed.
+COPY ibac/ce-demo/ce-proxy/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# Install CE-Manager from local source, --no-deps so we skip the IBM-internal
+# `llm-ce-proxy` dep that CE-Manager normally pulls (we ARE the proxy here).
+COPY CE-Manager /opt/CE-Manager
+RUN pip install --no-cache-dir --no-deps /opt/CE-Manager
+
+# Replace the real `llm-client` import with our stub. CE-Manager's
+# ce_manager/utils/__init__.py imports from llm_client at package load time,
+# but this demo's masker calls LiteLLM directly and never exercises llm_client,
+# so the stub is safe.
+COPY ibac/ce-demo/ce-proxy/stubs/llm_client /usr/local/lib/python3.12/site-packages/llm_client
+
+# Proxy source.
+COPY ibac/ce-demo/ce-proxy/app /app/app
+ENV PYTHONPATH=/app
+ENV PORT=9100
+
+EXPOSE 9100
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9100"]

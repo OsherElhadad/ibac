@@ -111,7 +111,8 @@ restart_host_sparc_worker() {
     set -a
     . "$ROOT_DIR/.env"
     set +a
-    export PYTHONPATH="$WORKSPACE_ROOT/agent-lifecycle-toolkit${PYTHONPATH:+:$PYTHONPATH}"
+    # agent-lifecycle-toolkit is now installed into the worker venv from PyPI,
+    # no PYTHONPATH override needed.
     export OBSERVER_URL="http://localhost:30070"
     export SPARC_WORKER_ID="host-sparc"
     nohup "$SPARC_WORKER_VENV/bin/python" "$ROOT_DIR/sparc-reflector/worker.py" >"$SPARC_WORKER_LOG" 2>&1 &
@@ -130,11 +131,8 @@ restart_host_sparc_worker() {
 
 ensure_host_sparc_worker_env() {
   local current_hash
-  current_hash=$(cat \
-    "$ROOT_DIR"/sparc-reflector/*.py \
-    "$WORKSPACE_ROOT"/agent-lifecycle-toolkit/pyproject.toml \
-    | shasum -a 256 | cut -d' ' -f1)
-  current_hash="${current_hash}-$(basename "$HOST_PYTHON_BIN")"
+  current_hash=$(cat "$ROOT_DIR"/sparc-reflector/*.py | shasum -a 256 | cut -d' ' -f1)
+  current_hash="${current_hash}-$(basename "$HOST_PYTHON_BIN")-pypi"
   local saved_hash
   saved_hash=$(cat "$SPARC_WORKER_VENV_HASH" 2>/dev/null || true)
 
@@ -157,9 +155,9 @@ ensure_host_sparc_worker_env() {
   fi
 
   if [ "$current_hash" != "$saved_hash" ]; then
-    echo "Installing host-side SPARC worker dependencies..."
+    echo "Installing host-side SPARC worker dependencies (agent-lifecycle-toolkit from PyPI)..."
     "$SPARC_WORKER_VENV/bin/pip" install --upgrade pip >/dev/null
-    "$SPARC_WORKER_VENV/bin/pip" install --no-cache-dir "$WORKSPACE_ROOT/agent-lifecycle-toolkit"
+    "$SPARC_WORKER_VENV/bin/pip" install --no-cache-dir agent-lifecycle-toolkit
     echo "$current_hash" > "$SPARC_WORKER_VENV_HASH"
   fi
 }
@@ -265,7 +263,9 @@ else
 fi
 
 # --- sparc-reflector ---
-if needs_build sparc-reflector "$ROOT_DIR"/sparc-reflector/*.py "$ROOT_DIR"/Dockerfile.sparc-reflector "$WORKSPACE_ROOT"/agent-lifecycle-toolkit/pyproject.toml "$WORKSPACE_ROOT"/agent-lifecycle-toolkit/altk/core/llm/providers/litellm/*.py "$WORKSPACE_ROOT"/agent-lifecycle-toolkit/altk/core/llm/*.py "$WORKSPACE_ROOT"/agent-lifecycle-toolkit/altk/pre_tool/core/*.py "$WORKSPACE_ROOT"/agent-lifecycle-toolkit/altk/pre_tool/sparc/*.py; then
+# agent-lifecycle-toolkit is now installed from PyPI inside the image, so the
+# rebuild hash only depends on the sparc-reflector sources + the Dockerfile.
+if needs_build sparc-reflector "$ROOT_DIR"/sparc-reflector/*.py "$ROOT_DIR"/Dockerfile.sparc-reflector; then
   echo "Building sparc-reflector image..."
   podman build -t localhost/ibac-sparc-reflector:latest -f "$ROOT_DIR/Dockerfile.sparc-reflector" "$WORKSPACE_ROOT"
   BUILD_IMAGES+=(localhost/ibac-sparc-reflector:latest)

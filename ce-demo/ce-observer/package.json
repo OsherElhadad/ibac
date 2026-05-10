@@ -1,0 +1,15 @@
+{
+  "name": "ce-observer-tests",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Playwright smoke harness for the CE-Manager observer UI",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "install-browsers": "playwright install --with-deps chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  }
+}

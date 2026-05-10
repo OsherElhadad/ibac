@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Context Engineering Demo — AuthBridge</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <p class="eyebrow">Context Engineering</p>
+          <h1>AuthBridge Demo</h1>
+          <p class="subtle">CE-Manager &middot; watsonx gpt-oss-120b</p>
+        </div>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Sessions</h2>
+            <button id="refreshSessions" class="ghost-button" type="button">Refresh</button>
+          </div>
+          <div id="sessionList" class="session-list empty-state">
+            Waiting for demo sessions&hellip;
+          </div>
+        </section>
+
+        <section class="panel legend-panel">
+          <h2>Lanes</h2>
+          <div class="legend-grid">
+            <span class="legend-chip user">User</span>
+            <span class="legend-chip ce-demo-agent">CE Demo Agent</span>
+            <span class="legend-chip ce-manager">CE Manager</span>
+            <span class="legend-chip watsonx">Watsonx</span>
+            <span class="legend-chip network">Network</span>
+          </div>
+        </section>
+
+        <details class="panel architecture-panel help-panel">
+          <summary>
+            <span class="help-icon" aria-hidden="true">?</span>
+            <span>How to read the UI</span>
+          </summary>
+          <ol class="pipeline-list">
+            <li><b>Stat strip</b>: turns, tokens, compactions, wall-time, cost, overflow — live on every event.</li>
+            <li><b>Context meter</b>: % of 131,072 tokens used right now.</li>
+            <li><b>Sparkline</b>: every model call plots one point; green ticks = mask_applied.</li>
+            <li><b>Conversation</b>: primary lane — user / agent / manager / watsonx turns. Click any item for the full conversation or the compacted context at that step.</li>
+            <li><b>Answer assembly</b>: checklist of facts the agent must collect. Each row shows the value, which tool produced it, and — if dropped — which specific compaction removed it (with a "view diff" link).</li>
+            <li><b>Raw events</b> (collapsed by default): kanban by lane, one card per event, for debugging.</li>
+          </ol>
+        </details>
+      </aside>
+
+      <main class="main-panel">
+        <section class="hero">
+          <div>
+            <p class="eyebrow">Live Replay Dashboard</p>
+            <h2 id="sessionTitle">Select a session</h2>
+            <p id="sessionMeta" class="subtle">
+              Run <code>make demo-ce-off</code> or <code>make demo-ce-on</code> to populate this page.
+            </p>
+          </div>
+          <div id="summaryBanner" class="summary-banner neutral">
+            Waiting for events
+          </div>
+        </section>
+
+        <section id="contextMeterSection" class="panel context-meter-panel sticky-meter">
+          <div class="panel-head">
+            <h2>Context window</h2>
+            <span class="subtle">
+              Current utilization vs. 131,072 tokens
+              <span id="modeBadge" class="mode-badge hidden"></span>
+            </span>
+          </div>
+          <div id="contextMeterWrap" class="context-meter-wrap">
+            <div class="context-meter">
+              <div id="contextMeterFill" class="context-meter-fill" style="width:0%"></div>
+              <div class="context-meter-tick tick-50"><span>50% threshold</span></div>
+              <div class="context-meter-tick tick-75"><span>75%</span></div>
+              <div class="context-meter-tick tick-100"><span>100% max</span></div>
+            </div>
+            <div class="context-meter-stats">
+              <span id="contextTokens">0 / 131,072 tokens</span>
+              <span class="sep">&middot;</span>
+              <span id="contextPercent">0%</span>
+              <span class="sep">&middot;</span>
+              <span id="contextMaskCount">0 compactions</span>
+            </div>
+          </div>
+          <div id="sparklineWrap" class="sparkline-wrap">
+            <div class="chart-title">Tokens per watsonx call</div>
+            <svg id="sparkline" viewBox="0 0 800 80" preserveAspectRatio="none"></svg>
+            <div id="sparklineLegend" class="sparkline-legend">
+              <span><i class="line-swatch"></i>tokens per watsonx call</span>
+              <span><i class="mask-swatch"></i>mask_applied</span>
+              <span><i class="overflow-swatch"></i>context_overflow</span>
+            </div>
+          </div>
+          <div id="costChartWrap" class="sparkline-wrap">
+            <div class="chart-title">Cost ($) · <span id="costTotal" class="chart-total">$0</span> total so far</div>
+            <svg id="costSparkline" viewBox="0 0 800 60" preserveAspectRatio="none"></svg>
+            <div class="sparkline-legend">
+              <span><i class="watsonx-swatch"></i>watsonx <span id="costTotalWatsonx" class="legend-sub">$0</span></span>
+              <span><i class="ce-swatch"></i>CE-Manager <span id="costTotalCe" class="legend-sub">$0</span></span>
+            </div>
+          </div>
+          <div id="latencyChartWrap" class="sparkline-wrap">
+            <div class="chart-title">Latency (s) · <span id="latencyTotal" class="chart-total">0 s</span> total so far</div>
+            <svg id="latencySparkline" viewBox="0 0 800 60" preserveAspectRatio="none"></svg>
+            <div class="sparkline-legend">
+              <span><i class="watsonx-lat-swatch"></i>watsonx <span id="latencyTotalWatsonx" class="legend-sub">0 s</span></span>
+              <span><i class="ce-swatch"></i>CE-Manager <span id="latencyTotalCe" class="legend-sub">0 s</span></span>
+            </div>
+          </div>
+          <div id="overflowBanner" class="overflow-banner hidden">
+            <b>CONTEXT WINDOW EXCEEDED &middot; <span id="overflowTokens"></span> &gt; 131,072 tokens</b>
+            <span>Watsonx rejected the request. The agent cannot continue without context engineering.</span>
+          </div>
+        </section>
+
+        <section id="answerPiecesSection" class="panel answer-pieces-panel hidden">
+          <div class="panel-head">
+            <h2>Answer assembly</h2>
+            <span class="subtle">Each piece is a small fact buried in one tool's bulky output. The answer is their concatenation.</span>
+          </div>
+          <div id="answerPiecesList" class="answer-pieces-list"></div>
+          <div class="answer-pieces-legend">
+            <span><i class="ap-dot pending"></i>waiting for tool</span>
+            <span><i class="ap-dot collected"></i>collected</span>
+            <span><i class="ap-dot survived"></i>still in context after compaction</span>
+            <span><i class="ap-dot dropped"></i>dropped by masker</span>
+          </div>
+        </section>
+
+        <section class="conversation-section panel">
+          <div class="panel-head">
+            <h2>Conversation</h2>
+            <span class="subtle">User requests, tool calls &amp; outputs, agent replies, masker interventions</span>
+          </div>
+          <div id="conversationFeed" class="conversation-feed empty-state">No conversation yet.</div>
+        </section>
+
+        <details class="timeline-section panel timeline-details">
+          <summary class="timeline-summary">
+            <span class="timeline-summary-label">Raw events</span>
+            <span class="subtle">Kanban by lane — debug view. Click to expand.</span>
+            <span id="liveBadge" class="live-badge hidden">Live</span>
+          </summary>
+          <div id="timelineColumns" class="timeline-columns"></div>
+        </details>
+      </main>
+    </div>
+
+    <template id="sessionItemTemplate">
+      <button class="session-item" type="button">
+        <span class="session-title"></span>
+        <span class="session-meta"></span>
+      </button>
+    </template>
+
+    <template id="eventCardTemplate">
+      <article class="event-card">
+        <div class="event-status-row">
+          <span class="event-status"></span>
+          <span class="event-time"></span>
+        </div>
+        <h3 class="event-title"></h3>
+        <p class="event-summary"></p>
+        <p class="event-preview hidden"></p>
+        <div class="event-badges"></div>
+        <button class="event-toggle hidden" type="button">View JSON</button>
+        <pre class="event-data hidden"></pre>
+      </article>
+    </template>
+
+    <template id="conversationItemTemplate">
+      <article class="conversation-item">
+        <div class="conversation-meta">
+          <span class="conversation-speaker"></span>
+          <span class="conversation-time"></span>
+        </div>
+        <div class="conversation-kind"></div>
+        <p class="conversation-text"></p>
+        <div class="conv-actions">
+          <button type="button" class="conv-btn conv-btn-full hidden">View full conversation</button>
+          <button type="button" class="conv-btn conv-btn-compacted hidden">View new compacted context</button>
+        </div>
+      </article>
+    </template>
+
+    <div id="diffModal" class="ce-modal hidden" aria-hidden="true">
+      <div class="ce-modal-backdrop" data-close-diff-modal="1"></div>
+      <div class="ce-modal-dialog ce-modal-wide" role="dialog" aria-modal="true" aria-labelledby="ceDiffModalTitle">
+        <header class="ce-modal-header">
+          <h3 id="ceDiffModalTitle">Compaction diff</h3>
+          <span id="ceDiffModalSubtitle" class="subtle"></span>
+          <div class="ce-modal-header-right">
+            <button id="ceDiffModalClose" type="button" class="ghost-button" aria-label="Close" data-close-diff-modal="1">&times;</button>
+          </div>
+        </header>
+        <div id="ceDiffModalBody" class="ce-modal-body ce-diff-body"></div>
+      </div>
+    </div>
+
+    <div id="contextModal" class="ce-modal hidden" aria-hidden="true">
+      <div class="ce-modal-backdrop" data-close-modal="1"></div>
+      <div class="ce-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="ceModalTitle">
+        <header class="ce-modal-header">
+          <h3 id="ceModalTitle">Compacted context</h3>
+          <span id="ceModalSubtitle" class="subtle"></span>
+          <div class="ce-modal-header-right">
+            <button id="ceModalCopy" type="button" class="ghost-button" title="Copy JSON to clipboard">Copy</button>
+            <button id="ceModalClose" type="button" class="ghost-button" aria-label="Close" data-close-modal="1">&times;</button>
+          </div>
+        </header>
+        <div id="ceModalBody" class="ce-modal-body"></div>
+      </div>
+    </div>
+
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

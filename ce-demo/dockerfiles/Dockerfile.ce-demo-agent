@@ -1,0 +1,17 @@
+# Build context: ibac/ (one level above ce-demo/), so we can COPY both
+# ce-demo/ce-demo-agent/ and the shared internal/ package + go.mod.
+# Usage:
+#   podman build -t localhost/ibac-ce-demo-agent:latest \
+#       -f ibac/ce-demo/dockerfiles/Dockerfile.ce-demo-agent ibac
+FROM golang:1.23-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY ce-demo/ce-demo-agent/ ce-demo-agent/
+COPY internal/ internal/
+RUN CGO_ENABLED=0 go build -o /ce-demo-agent ./ce-demo-agent/
+
+FROM alpine:3.19
+COPY --from=builder /ce-demo-agent /ce-demo-agent
+EXPOSE 8080
+CMD ["/ce-demo-agent"]

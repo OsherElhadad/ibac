@@ -1,0 +1,7 @@
+node_modules/
+test-results/
+playwright-report/
+.playwright/
+.env
+__pycache__/
+*.py[cod]

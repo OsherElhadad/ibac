@@ -1,0 +1,158 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ce-proxy
+  namespace: ibac
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ce-proxy
+  template:
+    metadata:
+      labels:
+        app: ce-proxy
+    spec:
+      # The kind pod network returns AAAA records for public hostnames (e.g.
+      # us-south.ml.cloud.ibm.com, iam.cloud.ibm.com) but has no IPv6 route
+      # to the internet. Without this, glibc's getaddrinfo returns the IPv6
+      # address first, TCP connect fails with ENETUNREACH / hangs for ~130s,
+      # and only then falls back to IPv4 — causing the "sometimes 2s, sometimes
+      # 272s" watsonx latency jitter. `no-aaaa` tells glibc to skip AAAA queries
+      # entirely (glibc 2.36+, in python:3.12-slim via Debian Bookworm).
+      dnsConfig:
+        options:
+          - name: no-aaaa
+      containers:
+        - name: ce-proxy
+          image: localhost/ibac-ce-proxy:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9100
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "1Gi"
+          env:
+            - name: CE_MODE
+              value: "off"                 # flip to "on" via kubectl set env
+            - name: CE_MAX_TOKENS
+              value: "131072"
+            - name: CE_THRESHOLD_FRAC
+              value: "0.60"
+            - name: CE_EMIT_DIFF_CONTENT
+              value: "true"
+            - name: CE_KEEP_LAST_N_TURNS
+              value: "2"
+            - name: CE_AGGRESSIVENESS
+              value: "0.8"
+            - name: CE_MAX_OUTPUT_CHARS
+              value: "120000"
+            - name: WATSONX_MODEL
+              value: "watsonx/openai/gpt-oss-120b"
+            - name: ACCEPTED_MODEL
+              value: "openai/gpt-oss-120b"
+            - name: OBSERVER_URL
+              value: "http://ce-observer.ibac.svc.cluster.local:7070"
+            - name: WATSONX_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ce-watsonx
+                  key: WATSONX_API_KEY
+            - name: WATSONX_PROJECT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ce-watsonx
+                  key: WATSONX_PROJECT_ID
+            - name: WATSONX_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ce-watsonx
+                  key: WATSONX_URL
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9100
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Long 100K-token watsonx calls can block a sync handler briefly
+          # (even with to_thread offload there's GIL pressure around LiteLLM
+          # serialization). Keep the liveness probe lenient enough to survive
+          # one or two slow calls without SIGKILLing the pod.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9100
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ce-proxy
+  namespace: ibac
+spec:
+  selector:
+    app: ce-proxy
+  ports:
+    - port: 9100
+      targetPort: 9100
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ce-demo-agent
+  namespace: ibac
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ce-demo-agent
+  template:
+    metadata:
+      labels:
+        app: ce-demo-agent
+    spec:
+      containers:
+        - name: ce-demo-agent
+          image: localhost/ibac-ce-demo-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: LLM_URL
+              value: "http://ce-proxy.ibac.svc.cluster.local:9100"
+            - name: LLM_MODEL
+              value: "openai/gpt-oss-120b"
+            - name: OBSERVER_URL
+              value: "http://ce-observer.ibac.svc.cluster.local:7070"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ce-demo-agent
+  namespace: ibac
+spec:
+  type: NodePort
+  selector:
+    app: ce-demo-agent
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30021
+      name: http

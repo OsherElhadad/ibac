@@ -2,10 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY agent-lifecycle-toolkit /opt/agent-lifecycle-toolkit
-COPY ibac/sparc-reflector /app
+# Install agent-lifecycle-toolkit from PyPI (project: altk-boost /
+# https://pypi.org/project/agent-lifecycle-toolkit/) so the build no longer
+# depends on an in-place checkout of the ALTK repo at the workspace root.
+RUN pip install --no-cache-dir agent-lifecycle-toolkit
 
-RUN python -m pip install --no-cache-dir /opt/agent-lifecycle-toolkit
+# Build context is the repo root — we only need the sparc-reflector sources.
+COPY ibac/sparc-reflector /app
 
 EXPOSE 8090
 CMD ["python", "/app/app.py"]

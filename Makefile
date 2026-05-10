@@ -1,5 +1,9 @@
 .PHONY: help create-cluster delete-cluster deploy undeploy \
-       demo-no-ibac demo-ibac demo-finance logs
+       demo-no-ibac demo-ibac demo-finance logs \
+       deploy-ce demo-ce-off demo-ce-on demo-ce-summary demo-ce-truncate demo-ce \
+       ce-fixtures ce-probe ui-test ui-test-install \
+       ce-proxy-mac-install ce-proxy-mac-up ce-proxy-mac-down ce-proxy-mac-logs \
+       demo-ce-mac-off demo-ce-mac-on demo-ce-mac-summary demo-ce-mac-truncate demo-ce-mac
 
 .DEFAULT_GOAL := help
 
@@ -14,6 +18,14 @@ help:
 	@echo "  demo-no-ibac          Run attack WITHOUT IBAC (exfiltration succeeds)"
 	@echo "  demo-ibac             Run attack WITH IBAC (exfiltration blocked)"
 	@echo "  demo-finance          Run finance demo with live SPARC + IBAC pipeline"
+	@echo "  deploy-ce             Build + deploy the CE-Manager demo (ce-proxy + ce-demo-agent)"
+	@echo "  demo-ce-off           Run CE demo with CE_MODE=off (Q1 overflows mid-investigation)"
+	@echo "  demo-ce-on            Run CE demo with CE_MODE=on (programmatic full-rewrite CE)"
+	@echo "  demo-ce-summary       Run CE demo with CE_MODE=summary (LLM rewrites old turns as prose)"
+	@echo "  demo-ce-truncate      Run CE demo with CE_MODE=truncate (deterministic eviction of old turns)"
+	@echo "  demo-ce               Run all four CE demo scenarios back-to-back"
+	@echo "  ce-fixtures           Regenerate tool fixtures for the CE demo"
+	@echo "  ce-probe              Run the watsonx/gpt-oss-120b sanity probe"
 	@echo "  logs                  View logs from all pods"
 
 # --- Kubernetes (kind) targets ---
@@ -38,6 +50,39 @@ demo-ibac:
 
 demo-finance:
 	./scripts/k8s-demo-finance.sh
+
+# --- CE-Manager demo (moved to ibac/ce-demo/ — run `make -C ibac/ce-demo help`) ---
+#
+# The CE-Manager demo is self-contained under ibac/ce-demo/. These
+# delegation targets keep the old `make deploy-ce` / `make demo-ce-*` /
+# `make ce-proxy-mac-*` entrypoints working from the ibac/ root.
+
+deploy-ce:           ; $(MAKE) -C ce-demo deploy
+demo-ce-off:         ; $(MAKE) -C ce-demo demo-off
+demo-ce-on:          ; $(MAKE) -C ce-demo demo-on
+demo-ce-summary:     ; $(MAKE) -C ce-demo demo-summary
+demo-ce-truncate:    ; $(MAKE) -C ce-demo demo-truncate
+demo-ce:             ; $(MAKE) -C ce-demo demo-off demo-truncate demo-summary demo-on
+
+ce-proxy-mac-install: ; $(MAKE) -C ce-demo proxy-mac-install
+ce-proxy-mac-up:      ; $(MAKE) -C ce-demo proxy-mac-up
+ce-proxy-mac-down:    ; $(MAKE) -C ce-demo proxy-mac-down
+ce-proxy-mac-logs:    ; $(MAKE) -C ce-demo proxy-mac-logs
+
+demo-ce-mac-off:      ; $(MAKE) -C ce-demo demo-mac-off
+demo-ce-mac-on:       ; $(MAKE) -C ce-demo demo-mac-on
+demo-ce-mac-summary:  ; $(MAKE) -C ce-demo demo-mac-summary
+demo-ce-mac-truncate: ; $(MAKE) -C ce-demo demo-mac-truncate
+demo-ce-mac:          ; $(MAKE) -C ce-demo demo-mac-off demo-mac-truncate demo-mac-summary demo-mac-on
+
+ce-fixtures:
+	python3 ce-demo/scripts/fixtures_gen.py
+
+ce-probe:
+	python3 ce-demo/scripts/ce_probe.py
+
+ui-test-install:      ; $(MAKE) -C ce-demo ui-test-install
+ui-test:              ; $(MAKE) -C ce-demo ui-test
 
 logs:
 	@echo "=== evil-server ===" && kubectl -n ibac logs -l app=evil-server --tail=50 || true
