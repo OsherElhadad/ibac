@@ -231,6 +231,93 @@ The demo script automatically:
 - runs the three turns in order
 - waits for the expected SPARC + refund + IBAC sequence
 
+## CE-Manager Demo
+
+A separate, self-contained Context Engineering demo lives under
+[`ce-demo/`](./ce-demo). It has nothing in common with the IBAC /
+SPARC / finance pipeline above — no Ollama, no ALTK, no SPARC
+reflector — and runs against IBM watsonx `gpt-oss-120b` directly
+through an on-host proxy.
+
+The demo drives a 6-tool security investigation pipeline whose
+trace deliberately overflows the 131K input window. It shows four
+compaction strategies side by side:
+
+- `on`       — LLM-driven masker that rewrites older tool outputs
+- `summary`  — CE-Manager's `highly_detailed` prose summarizer
+- `truncate` — deterministic eviction of oldest assistant/tool pairs
+- `off`      — baseline, no compaction (Q2 overflows)
+
+Three services run: the FastAPI [`ce-proxy`](./ce-demo/ce-proxy) on
+port `9100`, the Go tool-calling agent
+[`ce-demo-agent`](./ce-demo/ce-demo-agent) on `30021`, and the
+Go + static web [`ce-observer`](./ce-demo/ce-observer) on `30071`.
+
+### Prerequisites
+
+- macOS (Linux works — swap `rdctl` for your kind provider)
+- Rancher Desktop or Docker Desktop with `kind` enabled
+- `podman`, `kubectl`, `kind`
+- Python 3.11+
+- Go 1.23+
+- Node 20+ (only for optional Playwright UI smoke tests)
+- IBM watsonx API credentials
+
+No Ollama container is needed. The `ce-demo` cluster manifests
+live in their own namespace and do not touch the IBAC finance /
+email stack.
+
+### Installation (from scratch)
+
+All commands run from [`ibac/ce-demo/`](./ce-demo).
+
+```bash
+cd ce-demo
+
+# 1. Paste WATSONX_API_KEY / WATSONX_PROJECT_ID / WATSONX_URL
+cp .env.example .env
+
+# 2. One-shot setup: Python venv + CE-Manager fetch + pip deps
+make proxy-mac-install
+
+# 3. Fresh kind cluster (minimal, no Ollama probe)
+make create-cluster
+
+# 4. Build 3 podman images, load into kind, apply k8s manifests
+make deploy
+
+# 5. Start the Mac-hosted ce-proxy on :9100
+make proxy-mac-up
+```
+
+When these finish, the cluster has `ce-proxy`, `ce-demo-agent`,
+and `ce-observer` pods in the `ibac` namespace, the Mac proxy is
+listening on `localhost:9100`, and the observer UI is reachable at
+<http://localhost:30071>.
+
+### Running the demos
+
+```bash
+make demo-mac-off          # baseline — Q2 overflows
+make demo-mac-on           # masker — Q1 + Q2 both correct
+make demo-mac-summary      # LLM summarizer
+make demo-mac-truncate     # deterministic eviction
+```
+
+Each demo prints the Q1 and Q2 answers inline; the observer UI
+shows per-call token / cost / latency bars and the event stream.
+
+### Teardown
+
+```bash
+make proxy-mac-down
+make delete-cluster        # destroys the kind cluster
+```
+
+See [`ce-demo/README.md`](./ce-demo/README.md) for the full
+documentation, including the all-in-cluster path, the masker
+prompt, and troubleshooting.
+
 ## How IBAC Works
 
 1. Envoy receives inbound traffic on `:10000`.
