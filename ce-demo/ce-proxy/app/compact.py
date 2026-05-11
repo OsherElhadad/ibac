@@ -707,7 +707,7 @@ def run_summarizer(
     adapter = _SummarizerLLMAdapter(_client())
     cfg = SummarizerConfig(
         enabled=True,
-        summary_level="highly_detailed",
+        summary_level="regular",
         include_tool_calls=True,
         sub_summarize_without_tool_calls=False,
         model=None,  # adapter ignores this — it uses settings.watsonx_model
