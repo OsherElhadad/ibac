@@ -181,8 +181,15 @@ def _strip_harmony_markers(text: str) -> str:
     """
     if not isinstance(text, str) or "<|" not in text:
         return text
-    # Remove every <|...|> token wholesale.
-    cleaned = re.sub(r"<\|[^|>]*\|>", "", text)
+    # Remove every <|...|> token wholesale. The `[^>]*?` pattern tolerates
+    # pipes inside (e.g. `<|im_start|>` style) and stops at the first `|>`.
+    cleaned = re.sub(r"<\|[^>]*?\|>", "", text)
+    # Also drop a trailing `assistantfinal`/`assistant` preamble left behind
+    # when Harmony headers are stripped — the original text was
+    # `<|start|>assistant<|channel|>final<|message|>TEXT<|end|>`, and after
+    # stripping tokens we're left with `assistantfinalTEXT` which confuses
+    # downstream consumers. Keep just TEXT when we recognize this pattern.
+    cleaned = re.sub(r"^\s*assistant(?:final|analysis|commentary)?\s*", "", cleaned)
     return cleaned
 
 
@@ -263,141 +270,205 @@ _TOOL_TRUNCATE_CHARS = 60_000
 
 
 _MASKER_SYSTEM_PROMPT = (
-    "You aggressively compact older messages in a tool-calling "
-    "agent's conversation so it fits its context window. Mask (drop) "
-    "everything that is NOT needed to (a) execute the agent's next "
-    "pipeline steps, or (b) assemble the agent's final answer to the "
-    "user_goal. Keep ONLY the minimum needed.\n"
+    "You compact the `targets` array inside an agent's "
+    "conversation history so it fits the context window.\n"
     "\n"
-    "## Input\n"
+    "DO NOT answer user_goal. DO NOT continue the agent's task. "
+    "Your ONLY job is to return a JSON object mapping each idx to "
+    "a shorter `content` string.\n"
     "\n"
-    "A JSON object:\n"
-    "  \"user_goal\": string — the user's question / task.\n"
-    "  \"targets\":   array of "
-    "{\"idx\": int, \"role\": \"assistant\"|\"tool\", "
-    "\"content\": string}.\n"
+    "## The ONLY masking rule\n"
     "\n"
-    "## Output\n"
+    "For each target, KEEP every value the agent could need to "
+    "(a) execute its NEXT pipeline steps, or (b) assemble its "
+    "FINAL ANSWER to user_goal. Drop only content that cannot "
+    "possibly serve (a) or (b) — filler, duplicate-in-spirit rows "
+    "for clearly unrelated entities, chain-of-thought prose with "
+    "no values. When in doubt, KEEP. Dropping a signal is a HARD "
+    "FAILURE.\n"
     "\n"
-    "A JSON object mapping each idx (as a string) to its compacted "
-    "content. JSON ONLY — no preamble, no commentary, no code "
-    "fences. EVERY input idx MUST appear as a key.\n"
+    "## Input schema\n"
     "\n"
-    "## Masking rule (be aggressive)\n"
+    "You receive a JSON object:\n"
+    "  \"user_goal\": string — shows you what the agent is trying "
+    "to do and what its final-answer format looks like. Use it "
+    "ONLY to judge relevance. Do not answer it.\n"
+    "  \"targets\": array of {\"idx\": int, \"role\": "
+    "\"assistant\"|\"tool\", \"content\": string}.\n"
     "\n"
-    "For each target, keep a row/sentence ONLY if at least one of "
-    "these is true:\n"
-    "  1. The row matches the filter conditions described or implied "
-    "     by user_goal. When the goal asks for rows where a field "
-    "     takes a specific value (e.g. 'find rows where "
-    "     result=success and IP=X'), keep EVERY row satisfying that "
-    "     filter, not just one. The agent may have to enumerate, "
-    "     count, or list them all.\n"
-    "  2. The row contains values that the agent will directly quote "
-    "     in its final answer (numbers, ids, names, emails, paths, "
-    "     timestamps, bytes, ASNs, etc. that the user_goal's output "
-    "     format asks for).\n"
-    "  3. The row contains values that already appear in a LATER "
-    "     assistant message's content or tool_call arguments — those "
-    "     values are live in the pipeline.\n"
+    "## Output schema (critical — the parser is strict)\n"
     "\n"
-    "Drop EVERYTHING else. In particular, drop:\n"
-    "  • 'comparison' / distinct-value rows that the agent isn't "
-    "    actively using. Keeping a row 'just in case' is wrong.\n"
-    "  • routine, normal, unflagged, unrelated, old, or wrong-entity "
-    "    rows.\n"
-    "  • pure reasoning prose in assistant entries — keep only "
-    "    sentences that carry concrete values or explicit decisions.\n"
+    "Your entire response is ONE JSON OBJECT. The first character "
+    "MUST be `{`, the last MUST be `}`. Every input idx MUST "
+    "appear as a key (string form of the integer). The value for "
+    "each key is the compacted `content` as a STRING.\n"
     "\n"
-    "Aim for 80-95% reduction on each tool output. If you find you "
-    "are keeping more than a handful of rows from a large array, "
-    "you are not being aggressive enough.\n"
+    "  • For role='assistant' targets the value is a plain text "
+    "    string (shortened prose).\n"
+    "  • For role='tool' targets the value is a STRING that, when "
+    "    passed to json.loads, yields a JSON object with the same "
+    "    top-level keys as the input content. Inside that JSON, "
+    "    retained entries are copied BYTE-FOR-BYTE from the input.\n"
     "\n"
-    "HOWEVER — never drop a value that the agent needs. If a value "
-    "matches rule 1, 2, or 3 above, copying it byte-for-byte is "
-    "REQUIRED. Losing a signal value breaks the task.\n"
+    "No preamble. No 'We need to…' or 'Here is…' lead-in. No "
+    "commentary. No code fences. No prose before or after the JSON.\n"
     "\n"
-    "## Format per target\n"
+    "## Forbidden in output\n"
     "\n"
-    "role='assistant' → plain text. Keep only the sentences carrying "
-    "the values or decisions the agent needs.\n"
-    "\n"
-    "role='tool' → a parseable JSON string with the SAME top-level "
-    "keys as the input. Each retained array entry is copied "
-    "BYTE-FOR-BYTE — no paraphrase, no digit trimming, no field "
-    "renaming, no invented values. Output begins with '{' and ends "
-    "with '}' and json.loads must accept it.\n"
-    "\n"
-    "## Forbidden outputs\n"
-    "\n"
-    "  • '...' or any ellipsis inside tool JSON.\n"
-    "  • placeholders like '[omitted]', '[truncated]', '[CE-MASKED]', "
-    "or any note saying the content was shortened.\n"
-    "  • empty strings.\n"
+    "  • `...` or any ellipsis.\n"
+    "  • placeholders like `[omitted]`, `[truncated]`, `[CE-MASKED]`, "
+    "    notes about the content being shortened.\n"
+    "  • empty strings as values.\n"
     "  • partial / truncated JSON for tool entries.\n"
-    "  • naive first-N or last-N trimming — pick rows by rule 1/2/3, "
-    "not by position.\n"
+    "  • naive first-N or last-N trimming — pick by relevance.\n"
+    "  • paraphrased or invented values.\n"
+    "  • answering the user_goal.\n"
     "\n"
-    "## Example\n"
+    "## How to decide row-by-row (for arrays inside role='tool')\n"
     "\n"
-    "Say user_goal = \"Return the flagged event's id and amount for "
-    "account X, as a single line.\"\n"
+    "For each row in a tool response's array, ask: 'Could this "
+    "row's values end up in the final answer, or be needed by a "
+    "follow-up tool call?' If YES or UNSURE → keep. If clearly "
+    "NO → drop.\n"
     "\n"
-    "INPUT targets include this tool output at idx 3 (abridged for "
-    "illustration — your real inputs will be larger):\n"
+    "Almost always keep rows that:\n"
+    "  • mention any entity, IP, file, email, user, or "
+    "    identifier named or implied in user_goal;\n"
+    "  • share a flagged identifier (IP, filename, email, domain, "
+    "    hash) with another row that stood out. Once an IP or "
+    "    file is implicated, EVERY row touching it is signal — "
+    "    follow-up questions will ask about OTHER users / files "
+    "    tied to that identifier;\n"
+    "  • stand out against peers (unusual IP, foreign country, "
+    "    off-hours timestamp, unfamiliar user-agent, abnormal "
+    "    bytes, external recipient, bypass/deny policy flag, "
+    "    unusual result code);\n"
+    "  • carry a value type the final answer requires;\n"
+    "  • carry a value referenced later in the conversation.\n"
     "\n"
-    "{\"idx\":3, \"role\":\"tool\", \"content\":\n"
-    "  \"{\\\"events\\\":["
-    "{\\\"id\\\":\\\"e1\\\",\\\"account\\\":\\\"X\\\",\\\"kind\\\":"
-    "\\\"routine\\\",\\\"amount\\\":10},"
-    "{\\\"id\\\":\\\"e2\\\",\\\"account\\\":\\\"X\\\",\\\"kind\\\":"
-    "\\\"flagged\\\",\\\"amount\\\":1234},"
-    "{\\\"id\\\":\\\"e3\\\",\\\"account\\\":\\\"X\\\",\\\"kind\\\":"
-    "\\\"routine\\\",\\\"amount\\\":11},"
-    "{\\\"id\\\":\\\"e4\\\",\\\"account\\\":\\\"Y\\\",\\\"kind\\\":"
-    "\\\"flagged\\\",\\\"amount\\\":55}],\\\"total\\\":4}\"}\n"
+    "## Example 1 — tool response with a decoy + two signals + "
+    "unrelated rows\n"
     "\n"
-    "The CORRECT output entry for idx 3 is:\n"
+    "INPUT (what you receive):\n"
     "\n"
-    "\"3\": \"{\\\"events\\\":["
-    "{\\\"id\\\":\\\"e2\\\",\\\"account\\\":\\\"X\\\",\\\"kind\\\":"
-    "\\\"flagged\\\",\\\"amount\\\":1234}],\\\"total\\\":4}\"\n"
+    "{\n"
+    "  \"user_goal\": \"Investigate whether account X was "
+    "compromised. Answer: HH:MM · IP · FILE · BYTES · TO.\",\n"
+    "  \"targets\": [\n"
+    "    {\"idx\": 3, \"role\": \"tool\", \"content\": "
+    "\"{\\\"events\\\":[{\\\"ts\\\":\\\"09:12\\\","
+    "\\\"account\\\":\\\"X\\\",\\\"ip\\\":\\\"10.0.0.1\\\","
+    "\\\"action\\\":\\\"read\\\",\\\"bytes\\\":42},"
+    "{\\\"ts\\\":\\\"09:27\\\",\\\"account\\\":\\\"X\\\","
+    "\\\"ip\\\":\\\"203.0.113.9\\\",\\\"action\\\":\\\"exfil\\\","
+    "\\\"bytes\\\":2441472,\\\"file\\\":\\\"q3.xlsx\\\","
+    "\\\"to\\\":\\\"bad@evil.example\\\"},"
+    "{\\\"ts\\\":\\\"09:45\\\",\\\"account\\\":\\\"Y\\\","
+    "\\\"ip\\\":\\\"10.0.0.2\\\",\\\"action\\\":\\\"read\\\","
+    "\\\"bytes\\\":88}],\\\"total\\\":3}\"}\n"
+    "  ]\n"
+    "}\n"
     "\n"
-    "Why:\n"
-    "  • Kept e2 — the only row matching both 'account X' and "
-    "'flagged', which is rule 1 from user_goal. Its id and amount "
-    "will appear in the final answer (rule 2).\n"
-    "  • Dropped e1, e3 — 'routine' rows for account X do NOT answer "
-    "the user_goal; they are not flagged.\n"
-    "  • Dropped e4 — 'account Y' is not the account the user asked "
-    "about; no value from this row will appear in the answer.\n"
-    "  • Kept top-level keys 'events' and 'total'; copied 'total':4 "
-    "byte-for-byte.\n"
+    "CORRECT OUTPUT (what you return):\n"
     "\n"
-    "Going from 4 events to 1 is the right magnitude. Keeping e1 or "
-    "e4 'just in case' would be wrong.\n"
+    "{\"3\": \"{\\\"events\\\":[{\\\"ts\\\":\\\"09:27\\\","
+    "\\\"account\\\":\\\"X\\\",\\\"ip\\\":\\\"203.0.113.9\\\","
+    "\\\"action\\\":\\\"exfil\\\",\\\"bytes\\\":2441472,"
+    "\\\"file\\\":\\\"q3.xlsx\\\",\\\"to\\\":\\\"bad@evil.example"
+    "\\\"}],\\\"total\\\":3}\"}\n"
+    "\n"
+    "Notes on the output:\n"
+    "  • Wrapped as `{\"3\": \"...\"}` — one entry per input idx.\n"
+    "  • The value is a STRING that json.loads parses into "
+    "{\"events\":[...],\"total\":3} — a valid JSON object with "
+    "the same top-level keys (`events`, `total`).\n"
+    "  • Kept the exfil row — anomalous IP + abnormal bytes + "
+    "external recipient + matches answer schema (TS/IP/FILE/"
+    "BYTES/TO).\n"
+    "  • Dropped the 09:12 row — routine read, small bytes, no "
+    "anomaly, no value needed in answer.\n"
+    "  • Dropped the 09:45 row — different account (Y), unrelated "
+    "to user_goal, no shared identifier.\n"
+    "  • Top-level keys `events` and `total` are preserved; "
+    "`total:3` is copied byte-for-byte even though the kept array "
+    "has only 1 row (so the original count is still visible).\n"
+    "\n"
+    "## Example 2 — two targets, one assistant + one tool\n"
+    "\n"
+    "INPUT:\n"
+    "\n"
+    "{\n"
+    "  \"user_goal\": \"Which users logged in from the attacker "
+    "IP 203.0.113.9 in the last 30 days?\",\n"
+    "  \"targets\": [\n"
+    "    {\"idx\": 5, \"role\": \"assistant\", \"content\": "
+    "\"I will search logins by IP. The attacker IP is "
+    "203.0.113.9 based on earlier findings. Let me think about "
+    "what other analyses to run. Actually I'll just call the "
+    "login-search tool now.\"},\n"
+    "    {\"idx\": 6, \"role\": \"tool\", \"content\": "
+    "\"{\\\"ip\\\":\\\"203.0.113.9\\\",\\\"logins\\\":"
+    "[{\\\"user\\\":\\\"alice\\\",\\\"ts\\\":\\\"04:14\\\","
+    "\\\"result\\\":\\\"success\\\"},"
+    "{\\\"user\\\":\\\"bob\\\",\\\"ts\\\":\\\"07:51\\\","
+    "\\\"result\\\":\\\"success\\\"},"
+    "{\\\"user\\\":\\\"nobody\\\",\\\"ts\\\":\\\"12:01\\\","
+    "\\\"result\\\":\\\"failure\\\"}],\\\"total\\\":3}\"}\n"
+    "  ]\n"
+    "}\n"
+    "\n"
+    "CORRECT OUTPUT:\n"
+    "\n"
+    "{\"5\": \"Attacker IP is 203.0.113.9. Calling "
+    "login-search tool.\", \"6\": \"{\\\"ip\\\":\\\"203.0.113.9"
+    "\\\",\\\"logins\\\":[{\\\"user\\\":\\\"alice\\\","
+    "\\\"ts\\\":\\\"04:14\\\",\\\"result\\\":\\\"success\\\"},"
+    "{\\\"user\\\":\\\"bob\\\",\\\"ts\\\":\\\"07:51\\\","
+    "\\\"result\\\":\\\"success\\\"}],\\\"total\\\":3}\"}\n"
+    "\n"
+    "Notes:\n"
+    "  • idx 5 (assistant): kept the concrete fact "
+    "(attacker IP) and the decision (calling tool); dropped the "
+    "filler 'let me think about what other analyses'.\n"
+    "  • idx 6 (tool): value is a JSON STRING that json.loads "
+    "yields a JSON OBJECT with top-level keys `ip`, `logins`, "
+    "`total` — same as the input. Kept both successful logins "
+    "(they match user_goal's filter). Dropped the failure row "
+    "(not a successful login for the attacker IP). Top-level "
+    "`total:3` is preserved byte-for-byte.\n"
 )
 
 
 def _parse_idx_map(raw: str) -> Dict[int, str]:
     """Parse the LLM's output into {int_idx: content}. Tolerates code
-    fences, trailing prose, string-int keys, and partial/truncated
-    JSON — partial results beat sinking the whole compaction on one
-    over-long entry."""
+    fences, preamble prose ("We need to…"), trailing prose, string-
+    int keys, and partial/truncated JSON — partial results beat
+    sinking the whole compaction on one over-long entry."""
     s = raw.strip()
     if s.startswith("```"):
         s = re.sub(r"^```(?:json)?\s*", "", s)
         s = re.sub(r"\s*```\s*$", "", s)
+    # Strip any preamble before the first '{' (LLM reasoning like
+    # "We need to compact each target aggressively, keeping only…").
+    first_brace = s.find("{")
+    if first_brace > 0:
+        s = s[first_brace:]
+    # Strip any postamble after the last '}'.
+    last_brace = s.rfind("}")
+    if 0 <= last_brace < len(s) - 1:
+        s = s[: last_brace + 1]
     try:
         obj = json.loads(s)
         if isinstance(obj, dict):
             return _coerce_idx_map(obj)
     except Exception:  # noqa: BLE001
         pass
-    m = re.search(r"\{[\s\S]*\}", s)
-    if m:
+    # Try to recover truncated JSON: find the last complete "idx":"..."
+    # pair and close the object at that point.
+    recovered = _recover_truncated_json(s)
+    if recovered is not None:
         try:
-            obj = json.loads(m.group(0))
+            obj = json.loads(recovered)
             if isinstance(obj, dict):
                 return _coerce_idx_map(obj)
         except Exception:  # noqa: BLE001
@@ -416,6 +487,19 @@ def _parse_idx_map(raw: str) -> Dict[int, str]:
     if not out:
         log.warning("_parse_idx_map: no parseable entries in masker output: %r", raw[:300])
     return out
+
+
+def _recover_truncated_json(s: str) -> Optional[str]:
+    """When the masker response is cut mid-entry by max_tokens, keep
+    every COMPLETE "<digits>": "<string>" pair and close the object.
+    Returns a valid JSON object as a string, or None if nothing can
+    be recovered."""
+    pair_re = re.compile(r'"(\d+)"\s*:\s*"(?:[^"\\]|\\.)*"', flags=re.DOTALL)
+    matches = list(pair_re.finditer(s))
+    if not matches:
+        return None
+    body = ", ".join(m.group(0) for m in matches)
+    return "{" + body + "}"
 
 
 def _coerce_idx_map(obj: Dict[Any, Any]) -> Dict[int, str]:
@@ -514,9 +598,10 @@ def run_masker(
             {"role": "system", "content": _MASKER_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        max_tokens=4096,
+        max_tokens=16384,
         temperature=0.0,
         label="masker.rewrite",
+        reasoning_effort="low",
     )
     elapsed_s = time.monotonic() - t0
     client.last_generate_meta = meta
@@ -533,6 +618,12 @@ def run_masker(
             continue
         m["content"] = new_content
         rewritten += 1
+
+    if rewritten == 0:
+        log.warning(
+            "run_masker: 0 targets rewritten (targets=%d, raw_len=%d). raw head=%r",
+            len(targets), len(raw), raw[:500],
+        )
 
     msgs = sanitize_messages(msgs, messages)
 

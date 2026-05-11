@@ -197,6 +197,8 @@ class MaskerClient:
         max_tokens: int = 4096,
         temperature: float = 0.2,
         label: str = "ce-call",
+        response_format: Optional[Dict[str, Any]] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """Send a pre-built messages list to watsonx and return (text, meta).
 
@@ -205,6 +207,10 @@ class MaskerClient:
         want — unlike .generate() which prepends its own code-gen system
         prompt. Honours reasoning_content fallback the same way .generate()
         does.
+
+        `reasoning_effort` — when set, asks gpt-oss to keep its reasoning
+        channel short. "low" makes the model jump straight to the final
+        output instead of burning tokens on "We need to compact…" prose.
         """
         kwargs: Dict[str, Any] = {
             "model": self.model,
@@ -216,10 +222,20 @@ class MaskerClient:
             "project_id": settings.watsonx_project_id,
             "api_base": settings.watsonx_url,
         }
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
         resp, meta = _call_and_meter(kwargs, label)
         msg = resp.choices[0].message
         content = msg.content or ""
         reasoning = getattr(msg, "reasoning_content", "") or ""
+        # For masker.rewrite we want ONLY the JSON content. The reasoning
+        # channel is where "We need to compact…" preamble lives; never
+        # fall back to it for callers that passed reasoning_effort="low"
+        # (they've explicitly asked for content-only output).
+        if reasoning_effort == "low":
+            return content.strip(), meta
         if not content.strip() and reasoning.strip():
             return reasoning.strip(), meta
         return content.strip(), meta

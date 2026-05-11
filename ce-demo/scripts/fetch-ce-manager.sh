@@ -7,8 +7,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-WORKSPACE_ROOT="$(cd "$ROOT_DIR/.." && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"                 # ibac/ce-demo/
+WORKSPACE_ROOT="$(cd "$ROOT_DIR/../.." && pwd)"          # ibac-ce/ (sibling of ibac/)
 CE_MANAGER_DIR="${CE_MANAGER_DIR:-$WORKSPACE_ROOT/CE-Manager}"
 CE_MANAGER_REMOTE="${CE_MANAGER_REMOTE:-https://github.ibm.com/Context-Engineering/CE-Manager.git}"
 

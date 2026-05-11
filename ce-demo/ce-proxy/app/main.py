@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 
 from . import events
 from .compact import (
+    _strip_harmony_markers,
     apply_cache,
     diff_messages,
     reset_state,
@@ -400,6 +401,13 @@ async def chat_completions(
                 "compaction_method": method,
             },
         )
+
+    # Strip Harmony-format tokens from any assistant content before forwarding.
+    # These leak from gpt-oss reasoning_content as <|start|>…<|channel|>final<|message|>…
+    # and cause vllm to error "Unknown role: final" on the NEXT request.
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "assistant" and isinstance(m.get("content"), str):
+            m["content"] = _strip_harmony_markers(m["content"])
 
     # Forward to watsonx.
     events.emit(
