@@ -6,10 +6,6 @@ deterministic truncator, and no-compaction baseline — on a
 tool-calling agent running a noisy 6-tool security investigation
 pipeline.
 
-Everything in this directory is self-contained: no Ollama, no ALTK,
-no SPARC, no finance-agent dependencies. You can run the demo without
-touching anything else in the parent `ibac/` tree.
-
 ## What you get
 
 Three services:
